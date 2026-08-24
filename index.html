@@ -1,0 +1,1633 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#000000" />
+<meta http-equiv="Permissions-Policy" content="geolocation=(self), gyroscope=(self), accelerometer=(self)" />
+<title>Treasure Radar</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>📦</text></svg>" />
+<style>
+  :root {
+    --bg: #000000;
+    --panel: #18181b;
+    --panel-2: #27272a;
+    --line: rgba(255, 255, 255, 0.1);
+    --muted: #71717a;
+    --gold: #fbbf24;
+    --blue: #2563eb;
+    --red: #dc2626;
+    --green: #22c55e;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { height: 100%; }
+
+  body {
+    background: var(--bg);
+    color: #fff;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+
+  button { font: inherit; color: inherit; border: none; background: none; cursor: pointer; }
+
+  .hidden { display: none !important; }
+
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+
+  .label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.15em;
+    color: var(--muted);
+  }
+
+  /* ---------- Start screen ---------- */
+
+  #screen-start {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: radial-gradient(circle at 50% 30%, #1e293b 0%, #020617 70%);
+  }
+
+  .card {
+    width: 100%;
+    max-width: 360px;
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 24px;
+    padding: 32px;
+    text-align: center;
+    box-shadow: 0 25px 50px rgba(0, 0, 0, 0.6);
+  }
+
+  .card h1 { font-size: 28px; font-weight: 800; margin-bottom: 6px; }
+
+  .card .tagline { font-size: 12px; color: #94a3b8; margin-bottom: 24px; line-height: 1.6; }
+
+  #username {
+    width: 100%;
+    padding: 16px;
+    border-radius: 12px;
+    background: #334155;
+    border: 2px solid transparent;
+    color: #fff;
+    font-size: 16px;
+    outline: none;
+    margin-bottom: 12px;
+    text-align: center;
+  }
+
+  #username:focus { border-color: var(--gold); }
+
+  .btn-primary {
+    width: 100%;
+    padding: 16px;
+    border-radius: 12px;
+    background: var(--gold);
+    color: #000;
+    font-weight: 800;
+    font-size: 16px;
+    transition: transform 0.1s, background 0.2s;
+  }
+
+  .btn-primary:hover { background: #f59e0b; }
+  .btn-primary:active { transform: scale(0.97); }
+
+  .best-score { margin-top: 18px; font-size: 12px; color: #94a3b8; }
+  .best-score strong { color: var(--gold); }
+
+  .hint {
+    margin-top: 20px;
+    padding-top: 18px;
+    border-top: 1px solid #334155;
+    font-size: 11px;
+    color: #64748b;
+    line-height: 1.7;
+    text-align: left;
+  }
+
+  .hint b { color: #cbd5e1; }
+
+  .warn-box {
+    margin-top: 14px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: rgba(220, 38, 38, 0.15);
+    border: 1px solid rgba(248, 113, 113, 0.45);
+    color: #fecaca;
+    font-size: 12px;
+    line-height: 1.55;
+    text-align: left;
+  }
+
+  .warn-box strong { color: #fff; }
+
+  /* ---------- Game shell ---------- */
+
+  #screen-game { position: fixed; inset: 0; overflow: hidden; }
+
+  #screen-game.out-of-bounds {
+    box-shadow: inset 0 0 0 14px rgba(220, 38, 38, 0.75), inset 0 0 80px rgba(220, 38, 38, 0.5);
+  }
+
+  /* ---------- Scrolling world ---------- */
+
+  #world {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  #camera {
+    position: absolute;
+    transition: transform 0.45s ease-out;
+    z-index: 50;
+  }
+
+  #grid {
+    position: absolute;
+    transform: translate(-50%, -50%);
+    opacity: 0.1;
+    pointer-events: none;
+    background-image:
+      linear-gradient(#fff 1px, transparent 1px),
+      linear-gradient(90deg, #fff 1px, transparent 1px);
+  }
+
+  .box {
+    position: absolute;
+    font-size: 72px;
+    line-height: 1;
+    transform: translate(-50%, -50%);
+    cursor: pointer;
+    pointer-events: auto;
+    filter: brightness(0.2);
+    transition: filter 0.3s, transform 0.1s;
+    z-index: 100;
+  }
+
+  .box.nearest { filter: drop-shadow(0 0 25px var(--gold)); }
+
+  /* Close enough to grab — worth calling out, since pickup range varies by preset. */
+  .box.in-range {
+    filter: drop-shadow(0 0 30px var(--green)) brightness(1.15);
+    animation: pulse-range 1.1s ease-in-out infinite;
+  }
+
+  @keyframes pulse-range {
+    0%, 100% { transform: translate(-50%, -50%) scale(1); }
+    50%      { transform: translate(-50%, -50%) scale(1.12); }
+  }
+
+  .box:active { transform: translate(-50%, -50%) scale(0.85); }
+
+  /* ---------- Player ---------- */
+
+  #player {
+    position: relative;
+    z-index: 60;
+    pointer-events: none;
+    opacity: 0.9;
+  }
+
+  #player-body {
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    background: #fff;
+    border: 2px solid rgba(255, 255, 255, 0.2);
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: transform 0.12s linear;
+  }
+
+  #player-arrow {
+    width: 24px;
+    height: 32px;
+    margin-bottom: 32px;
+    background: var(--blue);
+    clip-path: polygon(50% 0%, 0% 100%, 50% 80%, 100% 100%);
+  }
+
+  #target-arc {
+    position: absolute;
+    inset: -32px;
+    border-top: 4px solid var(--gold);
+    border-radius: 50%;
+    transition: transform 0.25s ease-out;
+  }
+
+  /* ---------- HUD ---------- */
+
+  .hud { position: absolute; z-index: 200; }
+
+  #hud-top {
+    top: 32px;
+    left: 50%;
+    transform: translateX(-50%);
+    text-align: center;
+    pointer-events: none;
+    background: rgba(24, 24, 27, 0.9);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 10px 26px;
+    min-width: 170px;
+  }
+
+  #distance { font-size: 30px; font-weight: 900; }
+
+  #message { font-size: 11px; font-weight: 700; color: var(--gold); margin-top: 2px; min-height: 14px; }
+
+  #hud-stats {
+    display: flex;
+    gap: 14px;
+    justify-content: center;
+    margin-top: 6px;
+    font-size: 10px;
+    color: var(--muted);
+  }
+
+  .round-btn {
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    background: var(--panel);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+    transition: transform 0.1s;
+  }
+
+  .round-btn:active { transform: scale(0.9); }
+
+  #btn-quit { top: 24px; left: 20px; background: rgba(127, 29, 29, 0.4); border-color: rgba(239, 68, 68, 0.5); }
+  #btn-bag { top: 24px; right: 20px; }
+
+  #bag-count {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 5px;
+    border-radius: 10px;
+    background: var(--red);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* ---------- Minimap ---------- */
+
+  #minimap {
+    bottom: 32px;
+    right: 20px;
+    width: 108px;
+    height: 108px;
+    background: rgba(24, 24, 27, 0.8);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  #screen-game.out-of-bounds #minimap { border-color: var(--red); }
+
+  .dot { position: absolute; border-radius: 50%; transform: translate(-50%, -50%); }
+  .dot-box { width: 4px; height: 4px; background: rgba(255, 255, 255, 0.4); }
+  .dot-box.nearest { width: 8px; height: 8px; background: var(--gold); box-shadow: 0 0 5px var(--gold); }
+  .dot-player { width: 9px; height: 9px; background: var(--blue); border: 1px solid #fff; }
+  #screen-game.out-of-bounds .dot-player { background: var(--red); }
+
+  /* ---------- Manual controls (desktop / no-sensor fallback) ---------- */
+
+  #controls {
+    bottom: 28px;
+    left: 20px;
+    display: grid;
+    grid-template-columns: repeat(3, 56px);
+    grid-template-rows: repeat(2, 56px);
+    gap: 8px;
+  }
+
+  #controls button {
+    background: rgba(24, 24, 27, 0.85);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    font-size: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: transform 0.08s, background 0.15s;
+  }
+
+  #controls button:active { transform: scale(0.9); background: rgba(251, 191, 36, 0.25); }
+
+  #ctrl-fwd { grid-column: 2; grid-row: 1; }
+  #ctrl-left { grid-column: 1; grid-row: 2; }
+  #ctrl-back { grid-column: 2; grid-row: 2; }
+  #ctrl-right { grid-column: 3; grid-row: 2; }
+
+  #btn-compass {
+    bottom: 152px;
+    left: 20px;
+    padding: 8px 14px;
+    border-radius: 12px;
+    background: rgba(24, 24, 27, 0.85);
+    border: 1px solid var(--line);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  #btn-compass.on { border-color: var(--gold); color: var(--gold); }
+
+  /* ---------- Overlays ---------- */
+
+  .overlay {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: rgba(0, 0, 0, 0.85);
+    backdrop-filter: blur(10px);
+    z-index: 400;
+  }
+
+  #overlay-countdown { z-index: 600; background: rgba(0, 0, 0, 0.92); text-align: center; }
+
+  #countdown-text {
+    font-size: 96px;
+    font-weight: 900;
+    font-style: italic;
+    letter-spacing: -0.05em;
+    animation: pop 0.5s ease-out;
+  }
+
+  #countdown-text.small { font-size: 60px; }
+
+  #countdown-sub { margin-top: 32px; font-size: 11px; }
+
+  @keyframes pop {
+    0% { transform: scale(0.4); opacity: 0; }
+    60% { transform: scale(1.15); opacity: 1; }
+    100% { transform: scale(1); }
+  }
+
+  .panel {
+    width: 100%;
+    max-width: 320px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 24px;
+    padding: 24px;
+  }
+
+  .panel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+  .panel-head h3 { font-size: 12px; font-weight: 700; letter-spacing: 0.15em; text-transform: uppercase; }
+  .panel-head button { color: var(--muted); font-size: 20px; }
+
+  #bag-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+
+  .slot {
+    aspect-ratio: 1;
+    border-radius: 16px;
+    background: var(--panel-2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 28px;
+  }
+
+  .slot.filled { background: rgba(251, 191, 36, 0.2); border: 1px solid var(--gold); }
+
+  /* ---------- Result screen ---------- */
+
+  #overlay-result { flex-direction: column; background: #000; z-index: 500; }
+
+  #result-card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 24px;
+    padding: 36px 40px;
+    text-align: center;
+    max-width: 340px;
+  }
+
+  #result-title { font-size: 20px; font-weight: 900; letter-spacing: 0.05em; }
+  #result-name { color: var(--gold); font-size: 14px; font-weight: 700; margin: 8px 0 18px; }
+  #result-boxes { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; font-size: 36px; min-height: 44px; }
+  #result-stats { display: flex; gap: 24px; justify-content: center; margin-top: 22px; }
+  #result-stats div { text-align: center; }
+  #result-stats .v { font-size: 20px; font-weight: 800; }
+
+  .result-actions { display: flex; gap: 12px; margin-top: 28px; }
+
+  .btn-ghost {
+    padding: 14px 22px;
+    border-radius: 14px;
+    background: var(--panel-2);
+    font-weight: 700;
+    font-size: 14px;
+    transition: transform 0.1s;
+  }
+
+  .btn-save {
+    padding: 14px 26px;
+    border-radius: 14px;
+    background: linear-gradient(90deg, #22c55e, #059669);
+    font-weight: 800;
+    font-size: 14px;
+    transition: transform 0.1s;
+  }
+
+  .btn-ghost:active, .btn-save:active { transform: scale(0.95); }
+
+  .confirm-actions { display: flex; gap: 12px; margin-top: 8px; }
+  .confirm-actions button { flex: 1; padding: 14px; border-radius: 12px; font-weight: 700; }
+  .confirm-no { background: var(--panel-2); }
+  .confirm-yes { background: var(--red); }
+
+  /* ---------- Effects canvas ---------- */
+
+  #fx { position: fixed; inset: 0; pointer-events: none; z-index: 700; }
+
+  @media (max-width: 380px) {
+    #controls { grid-template-columns: repeat(3, 48px); grid-template-rows: repeat(2, 48px); }
+    #btn-compass { bottom: 132px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============ START SCREEN ============ -->
+<div id="screen-start">
+  <div class="card">
+    <h1>Treasure Radar 📡</h1>
+    <p id="tagline" class="tagline"></p>
+
+    <input id="username" type="text" placeholder="Enter your name…" maxlength="16" autocomplete="off" />
+    <button id="btn-play" class="btn-primary">PLAY</button>
+
+    <p id="best-score" class="best-score hidden"></p>
+
+    <div class="hint">
+      <b>On a phone:</b> open this page over <b>HTTPS</b>, allow Location, then walk outdoors. Shaking does nothing.<br />
+      <b>Desktop testing:</b> open with <code>?debug=1</code> to unlock keyboard/pad without GPS.
+    </div>
+    <div id="secure-warn" class="warn-box hidden"></div>
+  </div>
+</div>
+
+<!-- ============ GAME SCREEN ============ -->
+<div id="screen-game" class="hidden">
+
+  <div id="world">
+    <div id="camera">
+      <div id="grid"></div>
+      <div id="boxes"></div>
+    </div>
+
+    <div id="player">
+      <div id="player-body"><div id="player-arrow"></div></div>
+      <div id="target-arc"></div>
+    </div>
+  </div>
+
+  <button id="btn-quit" class="hud round-btn">🛑</button>
+
+  <button id="btn-bag" class="hud round-btn">
+    🎁<span id="bag-count" class="hidden">0</span>
+  </button>
+
+  <div id="hud-top" class="hud">
+    <p class="label">Target</p>
+    <div id="distance" class="mono">---</div>
+    <p id="message"></p>
+    <div id="hud-stats">
+      <span>⏱ <span id="stat-time" class="mono">0:00</span></span>
+      <span>🚶 <span id="stat-walked" class="mono">0</span> ft</span>
+      <span>⭐ <span id="stat-points" class="mono">0</span></span>
+    </div>
+    <p id="gps-status" class="label" style="margin-top:6px;letter-spacing:0.12em">GPS · waiting</p>
+  </div>
+
+  <div id="minimap" class="hud"></div>
+
+  <button id="btn-compass" class="hud">Compass: off</button>
+
+  <div id="controls" class="hud hidden">
+    <button id="ctrl-fwd" title="Step forward">▲</button>
+    <button id="ctrl-left" title="Turn left">◀</button>
+    <button id="ctrl-back" title="Step back">▼</button>
+    <button id="ctrl-right" title="Turn right">▶</button>
+  </div>
+</div>
+
+<!-- ============ OVERLAYS ============ -->
+<div id="overlay-countdown" class="overlay hidden">
+  <div>
+    <h1 id="countdown-text">READY?</h1>
+    <p id="countdown-sub" class="label">Initializing radar</p>
+  </div>
+</div>
+
+<div id="overlay-bag" class="overlay hidden">
+  <div class="panel">
+    <div class="panel-head">
+      <h3 id="bag-title">Backpack</h3>
+      <button id="btn-bag-close">✕</button>
+    </div>
+    <div id="bag-grid"></div>
+  </div>
+</div>
+
+<div id="overlay-quit" class="overlay hidden">
+  <div class="panel" style="text-align:center">
+    <h3 style="font-size:17px;font-weight:700;margin-bottom:22px">Abandon the hunt?</h3>
+    <div class="confirm-actions">
+      <button id="btn-quit-no" class="confirm-no">No</button>
+      <button id="btn-quit-yes" class="confirm-yes">Yes</button>
+    </div>
+  </div>
+</div>
+
+<div id="overlay-result" class="overlay hidden">
+  <div id="result-card">
+    <div id="result-title">MISSION COMPLETE</div>
+    <div id="result-name">player</div>
+    <div id="result-boxes"></div>
+    <div id="result-stats">
+      <div><div class="label">Time</div><div id="result-time" class="v mono">0:00</div></div>
+      <div><div class="label">Walked</div><div id="result-walked" class="v mono">0</div></div>
+      <div><div class="label">Points</div><div id="result-points" class="v mono">0</div></div>
+    </div>
+  </div>
+
+  <div class="result-actions">
+    <button id="btn-again" class="btn-ghost">PLAY AGAIN</button>
+    <button id="btn-save" class="btn-save">SAVE IMAGE 📸</button>
+  </div>
+</div>
+
+<canvas id="fx"></canvas>
+
+<script>
+"use strict";
+
+/* =========================================================================
+   Tuning
+   ========================================================================= */
+
+// Movement is GPS-based (1 real foot = 1 virtual foot). Shake/accelerometer
+// never moves the player. `pickupRange` must be generous because phone GPS
+// typically jitters ±15–40 ft outdoors.
+const PRESETS = {
+  // Open yard / park. Crates 25–70 ft out; needs ~150 ft of clear ground.
+  outdoor: { roomSize: 160, pixelScale: 14, pickupRange: 25, minRadius: 25 },
+
+  // Smaller field for denser outdoor spots. Still GPS-only.
+  compact: { roomSize: 80, pixelScale: 24, pickupRange: 20, minRadius: 15 },
+};
+
+const PRESET = PRESETS.outdoor;
+
+const ROOM_SIZE_FT = PRESET.roomSize;
+const PIXEL_SCALE  = PRESET.pixelScale;
+const PICKUP_RANGE = PRESET.pickupRange;
+const MIN_RADIUS   = PRESET.minRadius;
+const BOX_COUNT    = 5;
+const TURN_STEP    = 15;
+
+const GRID_FT = Math.max(1, Math.round(100 / PIXEL_SCALE));
+
+// GPS filters — reject jitter and bad fixes.
+const FT_PER_M = 3.280839895;
+const GPS_MAX_ACCURACY_FT = 50;   // ignore fixes worse than this
+const GPS_MIN_MOVE_FT = 3;        // ignore tiny GPS noise hops
+const GPS_FIX_TIMEOUT_MS = 20000;
+
+const DEBUG_MOVE = new URLSearchParams(location.search).has("debug");
+const STORAGE_KEY = "treasure_radar_save";
+
+/* =========================================================================
+   State
+   ========================================================================= */
+
+const state = {
+  username: "",
+  playing: false,
+  finished: false,
+  pos: { x: ROOM_SIZE_FT / 2, y: ROOM_SIZE_FT / 2 },
+  heading: 0,
+  boxes: [],
+  inventory: [],
+  points: 0,
+  walkedFt: 0,
+  startedAt: 0,
+  elapsed: 0,
+  outOfBounds: false,
+  nearest: { id: -1, distance: 0, angle: 0 },
+  compassEnabled: false,
+  gpsReady: false,
+  gpsAccuracyFt: null,
+};
+
+const gps = {
+  watchId: null,
+  origin: null,       // { lat, lng } locked on first good fix
+  lastAccepted: null, // last position that moved the player
+};
+
+const el = (id) => document.getElementById(id);
+
+const dom = {
+  screenStart: el("screen-start"),
+  screenGame: el("screen-game"),
+  username: el("username"),
+  bestScore: el("best-score"),
+  camera: el("camera"),
+  grid: el("grid"),
+  boxes: el("boxes"),
+  playerBody: el("player-body"),
+  targetArc: el("target-arc"),
+  distance: el("distance"),
+  message: el("message"),
+  gpsStatus: el("gps-status"),
+  statTime: el("stat-time"),
+  statWalked: el("stat-walked"),
+  statPoints: el("stat-points"),
+  bagCount: el("bag-count"),
+  bagGrid: el("bag-grid"),
+  bagTitle: el("bag-title"),
+  minimap: el("minimap"),
+  compass: el("btn-compass"),
+  controls: el("controls"),
+  countdown: el("overlay-countdown"),
+  countdownText: el("countdown-text"),
+  countdownSub: el("countdown-sub"),
+  overlayBag: el("overlay-bag"),
+  overlayQuit: el("overlay-quit"),
+  overlayResult: el("overlay-result"),
+  resultTitle: el("result-title"),
+  resultName: el("result-name"),
+  resultBoxes: el("result-boxes"),
+  resultTime: el("result-time"),
+  resultWalked: el("result-walked"),
+  resultPoints: el("result-points"),
+};
+
+/* =========================================================================
+   Local save (replaces the old MySQL user/item tables)
+   ========================================================================= */
+
+function loadSave() {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSave(data) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch {
+    /* private browsing — scores just won't persist */
+  }
+}
+
+function recordRun() {
+  const save = loadSave();
+  const complete = state.inventory.length === BOX_COUNT;
+  save.username = state.username;
+  save.totalPoints = (save.totalPoints || 0) + state.points;
+  save.runs = (save.runs || 0) + 1;
+  if (complete && (!save.bestTime || state.elapsed < save.bestTime)) {
+    save.bestTime = state.elapsed;
+  }
+  writeSave(save);
+}
+
+function showBestScore() {
+  const save = loadSave();
+  if (save.username) dom.username.value = save.username;
+  if (!save.bestTime) return;
+  dom.bestScore.innerHTML =
+    `Best clear: <strong>${formatTime(save.bestTime)}</strong> · ` +
+    `${save.totalPoints || 0} pts across ${save.runs || 0} run(s)`;
+  dom.bestScore.classList.remove("hidden");
+}
+
+/* =========================================================================
+   Helpers
+   ========================================================================= */
+
+function formatTime(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function distanceTo(box) {
+  return Math.hypot(state.pos.x - box.x, state.pos.y - box.y);
+}
+
+let messageTimer = 0;
+function flash(text) {
+  dom.message.textContent = text;
+  clearTimeout(messageTimer);
+  messageTimer = setTimeout(() => (dom.message.textContent = ""), 2000);
+}
+
+function buzz(ms) {
+  if (navigator.vibrate) navigator.vibrate(ms);
+}
+
+/* =========================================================================
+   World setup
+   ========================================================================= */
+
+function spawnBoxes() {
+  const center = ROOM_SIZE_FT / 2;
+  const minRadius = MIN_RADIUS;
+  const maxRadius = Math.max(minRadius + 1, ROOM_SIZE_FT / 2 - 5);
+
+  state.boxes = [];
+  for (let i = 0; i < BOX_COUNT; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const radius = minRadius + Math.sqrt(Math.random()) * (maxRadius - minRadius);
+    state.boxes.push({
+      id: i,
+      x: center + radius * Math.cos(angle),
+      y: center + radius * Math.sin(angle),
+      collected: false,
+    });
+  }
+}
+
+function buildWorld() {
+  const span = ROOM_SIZE_FT * PIXEL_SCALE * 4;
+  dom.grid.style.width = `${span}px`;
+  dom.grid.style.height = `${span}px`;
+  dom.grid.style.backgroundSize = `${GRID_FT * PIXEL_SCALE}px ${GRID_FT * PIXEL_SCALE}px`;
+
+  dom.boxes.innerHTML = "";
+  for (const box of state.boxes) {
+    const node = document.createElement("div");
+    node.className = "box";
+    node.textContent = "📦";
+    node.style.left = `${(box.x - ROOM_SIZE_FT / 2) * PIXEL_SCALE}px`;
+    node.style.top = `${(box.y - ROOM_SIZE_FT / 2) * PIXEL_SCALE}px`;
+    node.addEventListener("click", (e) => {
+      e.stopPropagation();
+      collect(box);
+    });
+    box.node = node;
+    dom.boxes.appendChild(node);
+  }
+
+  dom.minimap.innerHTML = "";
+  for (const box of state.boxes) {
+    const dot = document.createElement("div");
+    dot.className = "dot dot-box";
+    dot.style.left = `${(box.x / ROOM_SIZE_FT) * 100}%`;
+    dot.style.top = `${(box.y / ROOM_SIZE_FT) * 100}%`;
+    box.dot = dot;
+    dom.minimap.appendChild(dot);
+  }
+  const playerDot = document.createElement("div");
+  playerDot.className = "dot dot-player";
+  dom.minimap.appendChild(playerDot);
+  dom.playerDot = playerDot;
+}
+
+/* =========================================================================
+   Movement
+   ========================================================================= */
+
+function applyPosition(x, y, { countWalk = false, from = null } = {}) {
+  if (countWalk && from) {
+    state.walkedFt += Math.hypot(x - from.x, y - from.y);
+  }
+
+  state.outOfBounds =
+    x < 0 || x > ROOM_SIZE_FT || y < 0 || y > ROOM_SIZE_FT;
+
+  state.pos.x = Math.min(ROOM_SIZE_FT, Math.max(0, x));
+  state.pos.y = Math.min(ROOM_SIZE_FT, Math.max(0, y));
+  render();
+}
+
+/** Debug-only: move along facing. Disabled unless ?debug=1. */
+function step(direction) {
+  if (!DEBUG_MOVE || !state.playing || state.finished) return;
+  const from = { ...state.pos };
+  const x = state.pos.x + Math.sin(state.heading) * 5 * direction;
+  const y = state.pos.y - Math.cos(state.heading) * 5 * direction;
+  applyPosition(x, y, { countWalk: true, from });
+  buzz(40);
+}
+
+function turn(degrees) {
+  if (!state.playing || state.finished) return;
+  state.heading += (degrees * Math.PI) / 180;
+  render();
+}
+
+function updateNearest() {
+  const active = state.boxes.filter((b) => !b.collected);
+  if (active.length === 0) {
+    state.nearest = { id: -1, distance: 0, angle: 0 };
+    return;
+  }
+
+  let target = active[0];
+  let best = Infinity;
+  for (const box of active) {
+    const d = distanceTo(box);
+    if (d < best) { best = d; target = box; }
+  }
+
+  state.nearest = {
+    id: target.id,
+    distance: best,
+    angle: Math.atan2(target.y - state.pos.y, target.x - state.pos.x) * (180 / Math.PI),
+  };
+}
+
+/* =========================================================================
+   Rendering
+   ========================================================================= */
+
+function setGpsStatus(text) {
+  if (dom.gpsStatus) dom.gpsStatus.textContent = text;
+}
+
+function render() {
+  updateNearest();
+
+  const offsetX = (ROOM_SIZE_FT / 2 - state.pos.x) * PIXEL_SCALE;
+  const offsetY = (ROOM_SIZE_FT / 2 - state.pos.y) * PIXEL_SCALE;
+  dom.camera.style.transform = `translate(${offsetX}px, ${offsetY}px)`;
+
+  const headingDeg = state.heading * (180 / Math.PI);
+  dom.playerBody.style.transform = `rotate(${headingDeg}deg)`;
+  dom.targetArc.style.transform = `rotate(${state.nearest.angle + 90}deg)`;
+  dom.targetArc.style.opacity = state.nearest.id === -1 ? "0" : "1";
+
+  dom.distance.textContent =
+    state.nearest.id === -1 ? "---" : `${state.nearest.distance.toFixed(1)} FT`;
+
+  for (const box of state.boxes) {
+    box.node.classList.toggle("hidden", box.collected);
+    box.node.classList.toggle("nearest", box.id === state.nearest.id);
+    box.node.classList.toggle("in-range", !box.collected && distanceTo(box) <= PICKUP_RANGE);
+    box.dot.classList.toggle("hidden", box.collected);
+    box.dot.classList.toggle("nearest", box.id === state.nearest.id);
+  }
+
+  dom.playerDot.style.left = `${(state.pos.x / ROOM_SIZE_FT) * 100}%`;
+  dom.playerDot.style.top = `${(state.pos.y / ROOM_SIZE_FT) * 100}%`;
+
+  dom.screenGame.classList.toggle("out-of-bounds", state.outOfBounds);
+
+  dom.statWalked.textContent = Math.round(state.walkedFt);
+  dom.statPoints.textContent = state.points;
+  dom.bagCount.textContent = state.inventory.length;
+  dom.bagCount.classList.toggle("hidden", state.inventory.length === 0);
+}
+
+function tickClock() {
+  if (!state.playing || state.finished) return;
+  state.elapsed = (Date.now() - state.startedAt) / 1000;
+  dom.statTime.textContent = formatTime(state.elapsed);
+}
+
+/* =========================================================================
+   Collecting
+   ========================================================================= */
+
+function collect(box) {
+  if (box.collected || !state.playing) return;
+
+  if (distanceTo(box) > PICKUP_RANGE) {
+    flash("Too far — move closer.");
+    return;
+  }
+
+  box.collected = true;
+  state.inventory.push(box.id);
+  state.points += 10;
+  buzz([30, 40, 60]);
+  flash("Added to bag! 🎒");
+  burst(innerWidth / 2, innerHeight / 2, 40);
+  render();
+
+  if (state.inventory.length === BOX_COUNT) {
+    setTimeout(() => finish(false), 700);
+  }
+}
+
+/* =========================================================================
+   Game flow
+   ========================================================================= */
+
+async function requestOrientationPermission() {
+  if (
+    typeof DeviceOrientationEvent === "undefined" ||
+    typeof DeviceOrientationEvent.requestPermission !== "function"
+  ) {
+    return true;
+  }
+  try {
+    const result = await DeviceOrientationEvent.requestPermission();
+    return result === "granted";
+  } catch {
+    return false;
+  }
+}
+
+function isLocalFileUrl() {
+  const p = location.protocol;
+  return p === "file:" || p === "content:" || p === "blob:" || !window.isSecureContext;
+}
+
+function localFileGpsMessage() {
+  const proto = location.protocol.replace(":", "");
+  return (
+    "GPS cannot work when you open the HTML file directly on your phone.\n\n" +
+    `Current URL type: ${proto}:// (saved/local file)\n\n` +
+    "Double-tapping index.html, sharing the file, or opening from Downloads " +
+    "always fails — browsers block Location for local files. There is no setting to fix this.\n\n" +
+    "You must open the game from a web address:\n" +
+    "  https://your-domain.com/…/index.html\n\n" +
+    "Upload index.html to your server (HTTPS), then open that link in Chrome/Safari."
+  );
+}
+
+async function readGeolocationPermissionState() {
+  // Not supported on all mobile browsers (notably older iOS Safari).
+  try {
+    if (!navigator.permissions || !navigator.permissions.query) return "unsupported";
+    const status = await navigator.permissions.query({ name: "geolocation" });
+    return status.state; // "granted" | "denied" | "prompt"
+  } catch {
+    return "unsupported";
+  }
+}
+
+function geolocationAllowedByPolicy() {
+  try {
+    if (document.permissionsPolicy && typeof document.permissionsPolicy.allowsFeature === "function") {
+      return document.permissionsPolicy.allowsFeature("geolocation");
+    }
+    if (document.featurePolicy && typeof document.featurePolicy.allowsFeature === "function") {
+      return document.featurePolicy.allowsFeature("geolocation");
+    }
+  } catch {
+    /* ignore */
+  }
+  return null; // unknown
+}
+
+async function describeGpsError(err) {
+  const protocol = location.protocol;
+  const host = location.host || "(no host)";
+
+  if (protocol === "content:" || protocol === "file:" || protocol === "blob:") {
+    return localFileGpsMessage();
+  }
+
+  const insecure = !window.isSecureContext;
+  const perm = await readGeolocationPermissionState();
+  const policyOk = geolocationAllowedByPolicy();
+
+  if (insecure || protocol === "http:") {
+    return (
+      "GPS is blocked because this page is not secure.\n\n" +
+      `Current URL: ${protocol}//${host}\n\n` +
+      "Browsers only allow Location on HTTPS (or localhost).\n" +
+      "Fix: open the site with https://… not http://…"
+    );
+  }
+
+  if (policyOk === false || (err && err.message === "policy-blocked")) {
+    return (
+      "This page is not allowed to use Location (Permissions-Policy).\n\n" +
+      "Your server/CDN is blocking geolocation even though the phone Location toggle is ON.\n\n" +
+      "Ask your host to remove or change the header:\n" +
+      "  Permissions-Policy: geolocation=()\n" +
+      "to:\n" +
+      "  Permissions-Policy: geolocation=(self)"
+    );
+  }
+
+  if (err && err.code === 1) {
+    return (
+      "Browser refused Location for this site.\n\n" +
+      `Permission state: ${perm}\n` +
+      `URL: ${protocol}//${host}\n\n` +
+      "Device Location being ON is not enough — this *website* must be allowed:\n" +
+      "1. Tap the lock/tune icon in the address bar → Location → Allow\n" +
+      "2. Or Chrome/Safari site settings → Location → Allow for this domain\n" +
+      "3. Reload, then tap PLAY again (prompt must come from PLAY)\n" +
+      "4. iPhone: Settings → Safari/Chrome → Location → Ask/Allow"
+    );
+  }
+
+  if (err && err.code === 2) {
+    return "Location unavailable. Go outdoors with a clear sky and try again.";
+  }
+
+  if (err && err.code === 3) {
+    return "GPS timed out. Move outdoors, wait a few seconds, then try again.";
+  }
+
+  return (err && err.message) || "Could not get GPS location.";
+}
+
+/**
+ * Must be called directly from a tap/click — do not await anything before this
+ * on iOS/Android, or the browser silently returns PERMISSION_DENIED without a prompt.
+ */
+function requestGpsFix() {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) {
+      resolve({
+        ok: false,
+        err: { code: 0, message: "Geolocation is not supported on this device/browser." },
+      });
+      return;
+    }
+
+    if (!window.isSecureContext) {
+      resolve({ ok: false, err: { code: 1, message: "insecure" } });
+      return;
+    }
+
+    if (geolocationAllowedByPolicy() === false) {
+      resolve({ ok: false, err: { code: 1, message: "policy-blocked" } });
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ ok: true, pos }),
+      (err) => resolve({ ok: false, err }),
+      {
+        enableHighAccuracy: true,
+        maximumAge: 0,
+        timeout: GPS_FIX_TIMEOUT_MS,
+      }
+    );
+  });
+}
+
+async function play() {
+  const name = dom.username.value.trim();
+  if (!name) {
+    dom.username.focus();
+    dom.username.placeholder = "Name required!";
+    return;
+  }
+
+  state.username = name;
+
+  if (!DEBUG_MOVE && isLocalFileUrl()) {
+    alert(localFileGpsMessage());
+    setGpsStatus("GPS · local file");
+    return;
+  }
+
+  setGpsStatus("GPS · requesting…");
+
+  // CRITICAL: start GPS while we still have the user gesture from PLAY.
+  // Awaiting orientation (or anything else) first causes silent PERMISSION_DENIED on mobile.
+  let gpsResult = { ok: true, pos: null };
+  if (!DEBUG_MOVE) {
+    gpsResult = await requestGpsFix();
+  }
+
+  // Orientation can wait until after GPS — it is optional for movement.
+  await requestOrientationPermission();
+
+  if (!DEBUG_MOVE && !gpsResult.ok) {
+    const message = await describeGpsError(gpsResult.err);
+    alert(message);
+    setGpsStatus("GPS · denied");
+    return;
+  }
+
+  resetRun();
+
+  if (!DEBUG_MOVE) {
+    const { latitude, longitude, accuracy } = gpsResult.pos.coords;
+    const accuracyFt = accuracy * FT_PER_M;
+    if (accuracyFt > GPS_MAX_ACCURACY_FT) {
+      alert(
+        `GPS is too weak (±${Math.round(accuracyFt)} ft). ` +
+          `Go outdoors with a clear sky and try again.`
+      );
+      setGpsStatus(`GPS · weak ±${Math.round(accuracyFt)} ft`);
+      return;
+    }
+
+    gps.origin = { lat: latitude, lng: longitude };
+    gps.lastAccepted = { lat: latitude, lng: longitude };
+    state.gpsReady = true;
+    state.gpsAccuracyFt = accuracyFt;
+    setGpsStatus(`GPS · locked ±${Math.round(accuracyFt)} ft`);
+  }
+
+  dom.screenStart.classList.add("hidden");
+  dom.screenGame.classList.remove("hidden");
+  dom.controls.classList.toggle("hidden", !DEBUG_MOVE);
+
+  attachCompass();
+  if (!DEBUG_MOVE) startGpsWatch();
+  else setGpsStatus("DEBUG MOVE · keyboard/pad");
+
+  runCountdown();
+}
+
+function resetRun() {
+  stopGpsWatch();
+  state.playing = false;
+  state.finished = false;
+  state.pos = { x: ROOM_SIZE_FT / 2, y: ROOM_SIZE_FT / 2 };
+  state.heading = 0;
+  state.inventory = [];
+  state.points = 0;
+  state.walkedFt = 0;
+  state.elapsed = 0;
+  state.outOfBounds = false;
+  state.gpsReady = false;
+  state.gpsAccuracyFt = null;
+  gps.origin = null;
+  gps.lastAccepted = null;
+
+  spawnBoxes();
+  buildWorld();
+  render();
+  dom.statTime.textContent = "0:00";
+  dom.message.textContent = "";
+  setGpsStatus(DEBUG_MOVE ? "DEBUG MOVE" : "GPS · waiting");
+}
+
+function runCountdown() {
+  const sequence = ["READY?", "3", "2", "1", "GO! 🏃"];
+  let i = 0;
+
+  dom.countdown.classList.remove("hidden");
+  showCountdownFrame(sequence[0]);
+
+  const timer = setInterval(() => {
+    i++;
+    if (i < sequence.length) {
+      showCountdownFrame(sequence[i]);
+      if (i === sequence.length - 1) beginPlay();
+    } else {
+      clearInterval(timer);
+      dom.countdown.classList.add("hidden");
+    }
+  }, 1000);
+}
+
+function showCountdownFrame(text) {
+  const fresh = dom.countdownText.cloneNode(false);
+  fresh.textContent = text;
+  fresh.classList.toggle("small", text.length > 2);
+  dom.countdownText.replaceWith(fresh);
+  dom.countdownText = fresh;
+  dom.countdownSub.textContent =
+    text === "GO! 🏃" ? "Walk outdoors — GPS tracks you" : "Locking GPS origin";
+}
+
+function beginPlay() {
+  state.playing = true;
+  state.startedAt = Date.now();
+  if (!DEBUG_MOVE && !state.compassEnabled) {
+    // Auto-enable compass once the hunt starts — facing matters outdoors.
+    toggleCompass(true);
+  }
+}
+
+function finish(quit) {
+  if (state.finished) return;
+  state.finished = true;
+  state.playing = false;
+  stopGpsWatch();
+  recordRun();
+
+  dom.resultTitle.textContent = quit ? "MISSION ABORTED" : "MISSION COMPLETE";
+  dom.resultName.textContent = state.username;
+  dom.resultBoxes.innerHTML = state.inventory.length
+    ? state.inventory.map(() => "📦").join("")
+    : `<span style="font-size:13px;color:#52525b">No crates collected</span>`;
+  dom.resultTime.textContent = formatTime(state.elapsed);
+  dom.resultWalked.textContent = `${Math.round(state.walkedFt)} ft`;
+  dom.resultPoints.textContent = state.points;
+  dom.overlayResult.classList.remove("hidden");
+
+  if (!quit) fireworks();
+}
+
+/* =========================================================================
+   GPS tracking — the only way to move in normal play
+   ========================================================================= */
+
+function latLngToFeetOffset(lat, lng) {
+  const origin = gps.origin;
+  const mPerDegLat = 111320;
+  const mPerDegLng = 111320 * Math.cos((origin.lat * Math.PI) / 180);
+  const eastFt = (lng - origin.lng) * mPerDegLng * FT_PER_M;
+  const northFt = (lat - origin.lat) * mPerDegLat * FT_PER_M;
+  // +x east, -y north (screen Y grows downward; north is "up")
+  return {
+    x: ROOM_SIZE_FT / 2 + eastFt,
+    y: ROOM_SIZE_FT / 2 - northFt,
+  };
+}
+
+function startGpsWatch() {
+  if (!navigator.geolocation || gps.watchId !== null) return;
+
+  gps.watchId = navigator.geolocation.watchPosition(
+    onGpsUpdate,
+    (err) => {
+      setGpsStatus(`GPS · error ${err.code}`);
+      flash("GPS signal lost — keep moving outdoors.");
+    },
+    {
+      enableHighAccuracy: true,
+      maximumAge: 1000,
+      timeout: 15000,
+    }
+  );
+}
+
+function stopGpsWatch() {
+  if (gps.watchId !== null && navigator.geolocation) {
+    navigator.geolocation.clearWatch(gps.watchId);
+    gps.watchId = null;
+  }
+}
+
+function onGpsUpdate(position) {
+  if (state.finished) return;
+
+  const { latitude: lat, longitude: lng, accuracy } = position.coords;
+  const accuracyFt = accuracy * FT_PER_M;
+  state.gpsAccuracyFt = accuracyFt;
+
+  if (accuracyFt > GPS_MAX_ACCURACY_FT) {
+    setGpsStatus(`GPS · weak ±${Math.round(accuracyFt)} ft`);
+    return;
+  }
+
+  if (!gps.origin) {
+    gps.origin = { lat, lng };
+    gps.lastAccepted = { lat, lng };
+    state.gpsReady = true;
+    state.pos = { x: ROOM_SIZE_FT / 2, y: ROOM_SIZE_FT / 2 };
+    setGpsStatus(`GPS · locked ±${Math.round(accuracyFt)} ft`);
+    render();
+    return;
+  }
+
+  setGpsStatus(`GPS · ±${Math.round(accuracyFt)} ft`);
+
+  if (!state.playing) return;
+
+  // Distance from last accepted fix — filter out GPS jitter while standing still.
+  const mPerDegLat = 111320;
+  const mPerDegLng = 111320 * Math.cos((gps.lastAccepted.lat * Math.PI) / 180);
+  const dEast = (lng - gps.lastAccepted.lng) * mPerDegLng * FT_PER_M;
+  const dNorth = (lat - gps.lastAccepted.lat) * mPerDegLat * FT_PER_M;
+  const hopFt = Math.hypot(dEast, dNorth);
+
+  if (hopFt < GPS_MIN_MOVE_FT) return;
+
+  const from = { ...state.pos };
+  const next = latLngToFeetOffset(lat, lng);
+  gps.lastAccepted = { lat, lng };
+
+  // Derive facing from GPS track when compass is off.
+  if (!state.compassEnabled && hopFt >= GPS_MIN_MOVE_FT) {
+    state.heading = Math.atan2(dEast, dNorth);
+  }
+
+  applyPosition(next.x, next.y, { countWalk: true, from });
+  if (hopFt >= 6) buzz(25);
+}
+
+/* =========================================================================
+   Compass (facing only — never moves the player)
+   ========================================================================= */
+
+function attachCompass() {
+  window.addEventListener("deviceorientation", onDeviceOrientation);
+}
+
+let orientationFrame = 0;
+
+function onDeviceOrientation(e) {
+  if (!state.compassEnabled) return;
+  if (e.alpha === null && e.webkitCompassHeading === undefined) return;
+
+  const degrees = e.webkitCompassHeading ?? 360 - (e.alpha || 0);
+  state.heading = (degrees * Math.PI) / 180;
+
+  if (orientationFrame) return;
+  orientationFrame = requestAnimationFrame(() => {
+    orientationFrame = 0;
+    render();
+  });
+}
+
+function toggleCompass(forceOn) {
+  state.compassEnabled = typeof forceOn === "boolean" ? forceOn : !state.compassEnabled;
+  dom.compass.classList.toggle("on", state.compassEnabled);
+  dom.compass.textContent = `Compass: ${state.compassEnabled ? "on" : "off"}`;
+}
+
+/* =========================================================================
+   Manual controls (debug only)
+   ========================================================================= */
+
+const KEY_ACTIONS = {
+  ArrowUp:    (repeat) => !repeat && step(1),
+  KeyW:       (repeat) => !repeat && step(1),
+  ArrowDown:  (repeat) => !repeat && step(-1),
+  KeyS:       (repeat) => !repeat && step(-1),
+  ArrowLeft:  (repeat) => turn(repeat ? -TURN_STEP / 5 : -TURN_STEP),
+  KeyA:       (repeat) => turn(repeat ? -TURN_STEP / 5 : -TURN_STEP),
+  ArrowRight: (repeat) => turn(repeat ? TURN_STEP / 5 : TURN_STEP),
+  KeyD:       (repeat) => turn(repeat ? TURN_STEP / 5 : TURN_STEP),
+};
+
+function onKeyDown(e) {
+  if (!state.playing || state.finished) return;
+  const action = KEY_ACTIONS[e.code];
+  if (!action) return;
+  // Turns are always allowed; translation requires ?debug=1.
+  if ((e.code === "ArrowUp" || e.code === "ArrowDown" || e.code === "KeyW" || e.code === "KeyS") && !DEBUG_MOVE) {
+    return;
+  }
+  e.preventDefault();
+  action(e.repeat);
+}
+
+/* =========================================================================
+   Backpack
+   ========================================================================= */
+
+function openBag() {
+  dom.bagTitle.textContent = state.username || "Backpack";
+  dom.bagGrid.innerHTML = "";
+  for (let i = 0; i < BOX_COUNT; i++) {
+    const slot = document.createElement("div");
+    const filled = state.inventory.includes(i);
+    slot.className = filled ? "slot filled" : "slot";
+    slot.textContent = filled ? "📦" : "";
+    dom.bagGrid.appendChild(slot);
+  }
+  dom.overlayBag.classList.remove("hidden");
+}
+
+/* =========================================================================
+   Confetti (replaces the canvas-confetti CDN script)
+   ========================================================================= */
+
+const fx = el("fx");
+const fxCtx = fx.getContext("2d");
+const COLORS = ["#fbbf24", "#22c55e", "#3b82f6", "#ef4444", "#a855f7", "#ffffff"];
+let particles = [];
+let fxRunning = false;
+
+function resizeFx() {
+  const dpr = window.devicePixelRatio || 1;
+  fx.width = innerWidth * dpr;
+  fx.height = innerHeight * dpr;
+  fxCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function burst(x, y, count) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 3 + Math.random() * 7;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 3,
+      size: 4 + Math.random() * 6,
+      rot: Math.random() * Math.PI,
+      vr: (Math.random() - 0.5) * 0.3,
+      color: COLORS[(Math.random() * COLORS.length) | 0],
+      life: 1,
+    });
+  }
+  if (!fxRunning) { fxRunning = true; requestAnimationFrame(drawFx); }
+}
+
+function drawFx() {
+  fxCtx.clearRect(0, 0, innerWidth, innerHeight);
+
+  particles = particles.filter((p) => p.life > 0 && p.y < innerHeight + 60);
+  for (const p of particles) {
+    p.vy += 0.18;         // gravity
+    p.vx *= 0.99;         // drag
+    p.x += p.vx;
+    p.y += p.vy;
+    p.rot += p.vr;
+    p.life -= 0.006;
+
+    fxCtx.save();
+    fxCtx.translate(p.x, p.y);
+    fxCtx.rotate(p.rot);
+    fxCtx.globalAlpha = Math.max(0, p.life);
+    fxCtx.fillStyle = p.color;
+    fxCtx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size * 0.6);
+    fxCtx.restore();
+  }
+
+  if (particles.length) {
+    requestAnimationFrame(drawFx);
+  } else {
+    fxRunning = false;
+    fxCtx.clearRect(0, 0, innerWidth, innerHeight);
+  }
+}
+
+function fireworks() {
+  const until = Date.now() + 5000;
+  const timer = setInterval(() => {
+    if (Date.now() > until) return clearInterval(timer);
+    burst(innerWidth * (0.1 + Math.random() * 0.2), innerHeight * (0.1 + Math.random() * 0.3), 30);
+    burst(innerWidth * (0.7 + Math.random() * 0.2), innerHeight * (0.1 + Math.random() * 0.3), 30);
+  }, 260);
+}
+
+/* =========================================================================
+   Result screenshot (replaces html2canvas)
+   ========================================================================= */
+
+function saveResultImage() {
+  const W = 720, H = 900, dpr = 2;
+  const canvas = document.createElement("canvas");
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  const c = canvas.getContext("2d");
+  c.scale(dpr, dpr);
+
+  c.fillStyle = "#09090b";
+  c.fillRect(0, 0, W, H);
+
+  c.fillStyle = "#18181b";
+  c.strokeStyle = "rgba(255,255,255,0.12)";
+  c.lineWidth = 2;
+  c.beginPath();
+  if (c.roundRect) c.roundRect(48, 48, W - 96, H - 96, 36);
+  else c.rect(48, 48, W - 96, H - 96);
+  c.fill();
+  c.stroke();
+
+  c.textAlign = "center";
+
+  c.fillStyle = "#ffffff";
+  c.font = "900 44px system-ui, sans-serif";
+  c.fillText(dom.resultTitle.textContent, W / 2, 190);
+
+  c.fillStyle = "#fbbf24";
+  c.font = "700 30px system-ui, sans-serif";
+  c.fillText(state.username, W / 2, 250);
+
+  c.font = "64px system-ui, sans-serif";
+  const crates = state.inventory.map(() => "📦").join(" ") || "—";
+  c.fillText(crates, W / 2, 400);
+
+  c.fillStyle = "#71717a";
+  c.font = "700 18px system-ui, sans-serif";
+  c.fillText(`${state.inventory.length} of ${BOX_COUNT} crates recovered`, W / 2, 470);
+
+  const stats = [
+    ["TIME", formatTime(state.elapsed)],
+    ["WALKED", `${Math.round(state.walkedFt)} ft`],
+    ["POINTS", String(state.points)],
+  ];
+  stats.forEach(([label, value], i) => {
+    const x = W / 2 + (i - 1) * 190;
+    c.fillStyle = "#71717a";
+    c.font = "700 16px system-ui, sans-serif";
+    c.fillText(label, x, 600);
+    c.fillStyle = "#ffffff";
+    c.font = "800 38px ui-monospace, monospace";
+    c.fillText(value, x, 648);
+  });
+
+  c.fillStyle = "#3f3f46";
+  c.font = "600 18px system-ui, sans-serif";
+  c.fillText("TREASURE RADAR", W / 2, H - 110);
+
+  const link = document.createElement("a");
+  link.download = `${state.username || "player"}_result.png`;
+  link.href = canvas.toDataURL("image/png");
+  link.click();
+}
+
+/* =========================================================================
+   Wiring
+   ========================================================================= */
+
+el("btn-play").addEventListener("click", play);
+dom.username.addEventListener("keydown", (e) => { if (e.key === "Enter") play(); });
+
+el("btn-bag").addEventListener("click", openBag);
+el("btn-bag-close").addEventListener("click", () => dom.overlayBag.classList.add("hidden"));
+dom.overlayBag.addEventListener("click", (e) => {
+  if (e.target === dom.overlayBag) dom.overlayBag.classList.add("hidden");
+});
+
+el("btn-quit").addEventListener("click", () => dom.overlayQuit.classList.remove("hidden"));
+el("btn-quit-no").addEventListener("click", () => dom.overlayQuit.classList.add("hidden"));
+el("btn-quit-yes").addEventListener("click", () => {
+  dom.overlayQuit.classList.add("hidden");
+  finish(true);
+});
+
+el("btn-again").addEventListener("click", () => location.reload());
+el("btn-save").addEventListener("click", saveResultImage);
+
+el("ctrl-fwd").addEventListener("click", () => step(1));
+el("ctrl-back").addEventListener("click", () => step(-1));
+el("ctrl-left").addEventListener("click", () => turn(-TURN_STEP));
+el("ctrl-right").addEventListener("click", () => turn(TURN_STEP));
+
+dom.compass.addEventListener("click", toggleCompass);
+
+window.addEventListener("keydown", onKeyDown);
+window.addEventListener("resize", resizeFx);
+
+// Spell out what the active preset actually demands of the player's surroundings.
+const maxSpawnRadius = Math.max(MIN_RADIUS + 1, ROOM_SIZE_FT / 2 - 5);
+const spaceNeeded = Math.ceil((maxSpawnRadius * 2) / 10) * 10;
+el("tagline").innerHTML =
+  `${BOX_COUNT} crates are scattered up to ${Math.round(maxSpawnRadius)} ft away.<br />` +
+  `Follow the radar — <b>real GPS walking required</b>.<br />` +
+  `<span style="color:#64748b">Needs roughly ${spaceNeeded} ft of open outdoor space.</span>`;
+
+if (DEBUG_MOVE) {
+  el("tagline").innerHTML +=
+    `<br /><span style="color:#fbbf24">Debug mode: keyboard/pad movement enabled.</span>`;
+}
+
+const secureWarn = el("secure-warn");
+if (isLocalFileUrl()) {
+  secureWarn.classList.remove("hidden");
+  if (location.protocol === "content:" || location.protocol === "file:") {
+    secureWarn.innerHTML =
+      `<strong>Opened as a file — GPS will not work.</strong><br />` +
+      `Address shows <code>${location.protocol}//…</code> (local file). ` +
+      `Upload to your server and open <code>https://your-domain/…</code> instead.`;
+  } else {
+    secureWarn.innerHTML =
+      `<strong>GPS will not work on this URL.</strong><br />` +
+      `You are on <code>${location.protocol}//${location.host || "file"}</code>. ` +
+      `Browsers block Location unless the page is served over <strong>HTTPS</strong>.`;
+  }
+} else {
+  secureWarn.classList.add("hidden");
+}
+
+resizeFx();
+showBestScore();
+setInterval(tickClock, 200);
+</script>
+</body>
+</html>
