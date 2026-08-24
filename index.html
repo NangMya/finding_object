@@ -897,10 +897,12 @@ const gps = {
 
 const detector = {
   ctx: null,
-  gain: null,
+  unlocked: false,
   nextBeepAt: 0,
   running: false,
   lastDistFt: Infinity,
+  _tick: null,
+  _raf: 0,
 };
 
 const ar = {
@@ -1210,20 +1212,45 @@ function initDetectorAudio() {
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   if (!AudioCtx) return;
   detector.ctx = new AudioCtx();
-  detector.gain = detector.ctx.createGain();
-  detector.gain.gain.value = 0;
-  detector.gain.connect(detector.ctx.destination);
+}
+
+/** Must run during the PLAY tap — iOS/Android block audio otherwise. */
+async function unlockDetectorAudio() {
+  initDetectorAudio();
+  if (!detector.ctx) return false;
+  try {
+    if (detector.ctx.state === "suspended") await detector.ctx.resume();
+    // Inaudible prime opens the audio path on iOS Safari.
+    const t = detector.ctx.currentTime;
+    const osc = detector.ctx.createOscillator();
+    const g = detector.ctx.createGain();
+    g.gain.value = 0.001;
+    osc.frequency.value = 440;
+    osc.connect(g);
+    g.connect(detector.ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.02);
+    detector.unlocked = detector.ctx.state === "running";
+    return detector.unlocked;
+  } catch {
+    detector.unlocked = false;
+    return false;
+  }
 }
 
 function startProximityDetector() {
-  initDetectorAudio();
-  if (detector.ctx && detector.ctx.state === "suspended") {
+  if (detector.ctx?.state === "suspended") {
     detector.ctx.resume().catch(() => {});
   }
   detector.running = true;
   detector.nextBeepAt = 0;
-  if (!detector._tick) {
-    detector._tick = setInterval(tickProximityDetector, 40);
+  if (!detector._raf) {
+    const loop = () => {
+      tickProximityDetector();
+      if (detector.running) detector._raf = requestAnimationFrame(loop);
+      else detector._raf = 0;
+    };
+    detector._raf = requestAnimationFrame(loop);
   }
   dom.detectorStrip.classList.remove("hidden-strip");
   dom.bgStatus.classList.remove("hidden");
@@ -1231,43 +1258,53 @@ function startProximityDetector() {
 
 function stopProximityDetector() {
   detector.running = false;
-  if (detector._tick) {
-    clearInterval(detector._tick);
-    detector._tick = null;
+  if (detector._raf) {
+    cancelAnimationFrame(detector._raf);
+    detector._raf = 0;
   }
-  if (detector.gain) detector.gain.gain.value = 0;
   dom.detectorStrip.classList.add("hidden-strip");
 }
 
 function playDetectorBeep(intensity) {
-  if (!detector.ctx || !detector.gain) return;
+  if (!detector.ctx) return;
+  if (detector.ctx.state === "suspended") {
+    detector.ctx.resume().then(() => playDetectorBeep(intensity)).catch(() => {});
+    return;
+  }
+
   const t = detector.ctx.currentTime;
   const osc = detector.ctx.createOscillator();
   const env = detector.ctx.createGain();
+  const peak = 0.15 + intensity * 0.55;
+
   osc.type = "square";
-  osc.frequency.value = 280 + intensity * 720;
+  osc.frequency.value = 220 + intensity * 880;
+
   env.gain.setValueAtTime(0.0001, t);
-  env.gain.exponentialRampToValueAtTime(0.08 + intensity * 0.35, t + 0.01);
-  env.gain.exponentialRampToValueAtTime(0.0001, t + 0.07 + intensity * 0.04);
+  env.gain.exponentialRampToValueAtTime(Math.max(0.0002, peak), t + 0.008);
+  env.gain.exponentialRampToValueAtTime(0.0001, t + 0.09 + intensity * 0.05);
+
   osc.connect(env);
-  env.connect(detector.gain);
+  env.connect(detector.ctx.destination);
+
   osc.start(t);
-  osc.stop(t + 0.12);
-  if (navigator.vibrate && intensity > 0.65) {
-    navigator.vibrate(Math.round(20 + intensity * 40));
+  osc.stop(t + 0.14);
+
+  // Haptic alongside every beep (not only when very close).
+  if (navigator.vibrate) {
+    navigator.vibrate(Math.round(8 + intensity * 35));
   }
 }
 
 function tickProximityDetector() {
   if (!detector.running || !state.playing || state.finished) return;
+  if (document.hidden) return; // browser pauses audio/JS when screen off
   if (state.nearest.id === -1) return;
 
   const distFt = state.nearest.distance;
-  const maxFt = DETECTOR_MAX_FT;
-  const closeness = Math.max(0, Math.min(1, 1 - distFt / maxFt));
+  const closeness = Math.max(0, Math.min(1, 1 - distFt / DETECTOR_MAX_FT));
   const now = performance.now();
 
-  // Faster beeps + louder as you approach (metal-detector style).
   const intervalMs = 1800 - closeness * 1650;
   if (now >= detector.nextBeepAt) {
     playDetectorBeep(closeness);
@@ -1446,12 +1483,17 @@ function updateBackgroundStatus() {
   if (!dom.bgStatus || !state.playing) return;
   if (document.hidden) {
     state.bgPaused = true;
-    dom.bgStatus.textContent = `GPS · background (${gps.hiddenUpdates} fixes)`;
+    dom.bgStatus.textContent = `Paused — unlock phone for sound (${gps.hiddenUpdates} GPS fixes)`;
+    dom.bgStatus.style.color = "#f87171";
+  } else if (!detector.unlocked) {
+    dom.bgStatus.textContent = "Tap PLAY again if no beeps (audio blocked)";
     dom.bgStatus.style.color = "#fbbf24";
   } else {
     state.bgPaused = false;
-    dom.bgStatus.textContent = wakeLock ? "GPS · tracking · screen awake" : "GPS · tracking";
-    dom.bgStatus.style.color = "";
+    dom.bgStatus.textContent = wakeLock
+      ? "Detector active · screen kept awake"
+      : "Detector active · keep screen on for sound";
+    dom.bgStatus.style.color = wakeLock ? "" : "#fbbf24";
   }
 }
 
@@ -1659,6 +1701,9 @@ async function play() {
 
   state.username = name;
 
+  // Unlock detector audio on the PLAY tap (required on iOS/Android).
+  await unlockDetectorAudio();
+
   if (!DEBUG_MOVE && isLocalFileUrl()) {
     alert(localFileGpsMessage());
     setGpsStatus("GPS · local file");
@@ -1710,6 +1755,7 @@ async function play() {
   dom.controls.classList.toggle("hidden", !DEBUG_MOVE);
 
   attachCompass();
+  acquireWakeLock();
   if (!DEBUG_MOVE) startGpsWatch();
   else setGpsStatus("DEBUG MOVE · keyboard/pad");
 
