@@ -826,11 +826,12 @@
 // never moves the player. `pickupRange` must be generous because phone GPS
 // typically jitters ±15–40 ft outdoors.
 const PRESETS = {
-  // Open yard / park. Crates 25–70 ft out; needs ~150 ft of clear ground.
-  outdoor: { roomSize: 160, pixelScale: 14, pickupRange: 25, minRadius: 25 },
+  // Crates spawn beyond 20 m so the alarm stays quiet until you walk in.
+  // 70–95 ft ≈ 21–29 m from start.
+  outdoor: { roomSize: 200, pixelScale: 12, pickupRange: 25, minRadius: 70 },
 
-  // Smaller field for denser outdoor spots. Still GPS-only.
-  compact: { roomSize: 80, pixelScale: 24, pickupRange: 20, minRadius: 15 },
+  // Smaller field — still starts outside the 20 m alert ring when possible.
+  compact: { roomSize: 120, pixelScale: 18, pickupRange: 20, minRadius: 70 },
 };
 
 const PRESET = PRESETS.outdoor;
@@ -903,13 +904,14 @@ const detector = {
   running: false,
   lastDistM: Infinity,
   zone: "far",          // far | near | hot
-  // Web Audio — beeps are scheduled on the audio clock (survives main-thread throttle)
+  // Web Audio — beeps scheduled on the audio clock
   ctx: null,
   master: null,
+  alarmGain: null,      // muted when > 20 m (silences already-queued beeps too)
   keepAliveNode: null,
-  nextBeepTime: 0,      // AudioContext seconds
+  keepAliveGain: null,
+  nextBeepTime: 0,
   schedulerId: null,
-  // HTML5 Audio backup loop (helps iOS keep the page alive)
   htmlLoop: null,
 };
 
@@ -1289,46 +1291,62 @@ function initWebAudio() {
   detector.master = detector.ctx.createGain();
   detector.master.gain.value = 1;
   detector.master.connect(detector.ctx.destination);
+
+  // Alarm path — hard-muted whenever distance > 20 m.
+  detector.alarmGain = detector.ctx.createGain();
+  detector.alarmGain.gain.value = 0;
+  detector.alarmGain.connect(detector.master);
+
+  detector.keepAliveGain = detector.ctx.createGain();
+  detector.keepAliveGain.gain.value = 1;
+  detector.keepAliveGain.connect(detector.master);
   return detector.ctx;
 }
 
-/** Continuous near-silent loop on the audio thread — the core background trick. */
+/** Set alarmGain instantly. Cancels audible beeps when leaving the 20 m zone. */
+function setAlarmEnabled(on) {
+  if (!detector.alarmGain || !detector.ctx) return;
+  const g = detector.alarmGain.gain;
+  const t = detector.ctx.currentTime;
+  try {
+    g.cancelScheduledValues(t);
+    g.setValueAtTime(on ? 1 : 0, t);
+  } catch {
+    g.value = on ? 1 : 0;
+  }
+}
+
+/** Truly silent keep-alive buffer (zeros) — must not be heard as a pulse. */
 function startWebAudioKeepAlive() {
   const ctx = initWebAudio();
   if (!ctx || detector.keepAliveNode) return;
 
-  // 2 seconds of very quiet low-frequency pulse (not silent — silent often gets dropped).
   const seconds = 2;
   const rate = ctx.sampleRate;
   const buffer = ctx.createBuffer(1, rate * seconds, rate);
-  const data = buffer.getChannelData(0);
-  for (let i = 0; i < data.length; i++) {
-    const t = i / rate;
-    // Soft 1 Hz pulse * 40 Hz at ~0.15% — nearly inaudible keep-alive (not the alarm)
-    const env = 0.5 + 0.5 * Math.sin(2 * Math.PI * 1 * t);
-    data[i] = Math.sin(2 * Math.PI * 40 * t) * 0.0015 * env;
-  }
+  // Leave channel data as zeros — silent. Audio thread still stays active.
 
   const src = ctx.createBufferSource();
   src.buffer = buffer;
   src.loop = true;
-  const g = ctx.createGain();
-  g.gain.value = 1;
-  src.connect(g);
-  g.connect(detector.master);
+  src.connect(detector.keepAliveGain);
   src.start(0);
   detector.keepAliveNode = src;
 }
 
 function startHtmlAudioKeepAlive() {
-  // Second persistence path for iOS Safari (HTML5 media session).
+  // Silent WAV loop for iOS media-session persistence (not an alarm tone).
   if (!detector.htmlLoop) {
-    detector.htmlLoop = new Audio(makeBeepDataUrl(40, 1200, 0.008));
+    detector.htmlLoop = new Audio(makeBeepDataUrl(1, 2000, 0)); // amplitude 0 = silence
     detector.htmlLoop.loop = true;
-    detector.htmlLoop.volume = 0.008; // nearly inaudible — not the alarm
+    detector.htmlLoop.volume = 0;
+    detector.htmlLoop.muted = true;
     detector.htmlLoop.setAttribute("playsinline", "");
     detector.htmlLoop.setAttribute("webkit-playsinline", "");
   }
+  // Unmute element but keep sample amplitude 0 — some browsers ignore muted=true for media session.
+  detector.htmlLoop.muted = false;
+  detector.htmlLoop.volume = 0;
   detector.htmlLoop.play().catch(() => {});
 }
 
@@ -1388,7 +1406,9 @@ async function unlockDetectorAudio(playConfirm) {
 /** Schedule one beep on the Web Audio clock (works while main thread is throttled). */
 function scheduleBeepAt(when, intensity) {
   const ctx = detector.ctx;
-  if (!ctx || !detector.master) return;
+  if (!ctx || !detector.alarmGain) return;
+  // Hard gate: never schedule if currently outside alert range.
+  if (!(detector.lastDistM <= PROX_ALERT_M)) return;
 
   const freq = intensity > 0.75 ? 880 : intensity > 0.4 ? 560 : 320;
   const dur = intensity > 0.75 ? 0.08 : 0.12;
@@ -1402,16 +1422,19 @@ function scheduleBeepAt(when, intensity) {
   env.gain.exponentialRampToValueAtTime(Math.max(0.0002, peak), when + 0.01);
   env.gain.exponentialRampToValueAtTime(0.0001, when + dur);
   osc.connect(env);
-  env.connect(detector.master);
+  env.connect(detector.alarmGain); // gated — silent when alarmGain = 0
   osc.start(when);
   osc.stop(when + dur + 0.02);
 }
 
 function scheduleBeepNow(intensity, freqOverride, durOverride) {
   const ctx = detector.ctx;
-  if (!ctx || !detector.master) return;
+  if (!ctx || !detector.alarmGain) return;
   const when = ctx.currentTime + 0.02;
   if (freqOverride != null) {
+    // Unlock / test tones bypass distance gate (go through alarmGain but force enable briefly).
+    const wasOn = detector.alarmGain.gain.value > 0.5;
+    setAlarmEnabled(true);
     const osc = ctx.createOscillator();
     const env = ctx.createGain();
     osc.type = "sine";
@@ -1421,9 +1444,18 @@ function scheduleBeepNow(intensity, freqOverride, durOverride) {
     env.gain.exponentialRampToValueAtTime(peak, when + 0.01);
     env.gain.exponentialRampToValueAtTime(0.0001, when + (durOverride || 0.15));
     osc.connect(env);
-    env.connect(detector.master);
+    env.connect(detector.alarmGain);
     osc.start(when);
     osc.stop(when + (durOverride || 0.15) + 0.02);
+    if (!wasOn && !(detector.lastDistM <= PROX_ALERT_M)) {
+      // Restore mute after the short confirm tone.
+      const offAt = when + (durOverride || 0.15) + 0.05;
+      try {
+        detector.alarmGain.gain.setValueAtTime(0, offAt);
+      } catch {
+        setTimeout(() => setAlarmEnabled(false), 250);
+      }
+    }
   } else {
     scheduleBeepAt(when, intensity);
   }
@@ -1455,7 +1487,10 @@ function zoneForDistanceM(distM) {
  */
 function pumpBeepScheduler() {
   if (!detector.running || !detector.ctx || !state.playing || state.finished) return;
-  if (state.nearest.id === -1) return;
+  if (state.nearest.id === -1) {
+    setAlarmEnabled(false);
+    return;
+  }
 
   const ctx = detector.ctx;
   if (ctx.state === "suspended") {
@@ -1466,11 +1501,14 @@ function pumpBeepScheduler() {
   const distM = detector.lastDistM;
   const interval = intervalForDistanceM(distM);
 
-  // Outside 20 m — no detector beeps.
+  // Outside 20 m — hard mute alarm path and clear schedule.
   if (interval == null) {
+    setAlarmEnabled(false);
     detector.nextBeepTime = 0;
     return;
   }
+
+  setAlarmEnabled(true);
 
   const intensity = intensityForDistanceM(distM);
   const horizon = ctx.currentTime + 1.25;
@@ -1485,7 +1523,6 @@ function pumpBeepScheduler() {
     detector.nextBeepTime += interval;
   }
 
-  // Strong haptic under 8 m when screen is visible.
   if (!document.hidden && distM <= 8 && navigator.vibrate) {
     try {
       navigator.vibrate([500, 200, 500]);
@@ -1497,18 +1534,16 @@ function startProximityDetector() {
   detector.running = true;
   detector.nextBeepTime = 0;
   detector.lastDistM = state.nearest.id === -1 ? Infinity : ftToM(state.nearest.distance);
+  setAlarmEnabled(detector.lastDistM <= PROX_ALERT_M);
 
   startWebAudioKeepAlive();
   startHtmlAudioKeepAlive();
   setupMediaSession();
 
   if (detector.schedulerId) clearInterval(detector.schedulerId);
-  // Short interval when visible; GPS callbacks also pump the scheduler when hidden.
   detector.schedulerId = setInterval(() => {
     if (document.hidden) {
-      // While hidden, still try to top-up the audio queue (may be throttled).
       pumpBeepScheduler();
-      // Nudge HTML loop if iOS paused it.
       if (detector.htmlLoop && detector.htmlLoop.paused) {
         detector.htmlLoop.play().catch(() => {});
       }
@@ -1520,6 +1555,7 @@ function startProximityDetector() {
 
   dom.detectorStrip.classList.remove("hidden-strip");
   dom.bgStatus.classList.remove("hidden");
+  updateProximityUI(); // refresh distance + mute/unmute before first pump
   pumpBeepScheduler();
   updateBackgroundStatus();
 }
@@ -1561,7 +1597,9 @@ function updateProximityFromDistanceM(distM) {
   const zoneChanged = zone !== detector.zone;
   detector.zone = zone;
 
-  // Always top-up the audio queue when distance changes (critical for background).
+  // Mute immediately when leaving the 20 m zone (before scheduling).
+  setAlarmEnabled(distM <= PROX_ALERT_M);
+
   if (detector.running) pumpBeepScheduler();
 
   if (zoneChanged && zone === "hot" && !document.hidden && navigator.vibrate) {
