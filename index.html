@@ -1222,8 +1222,7 @@ function formatDistanceM(ft) {
       while a media session is active
    ========================================================================= */
 
-const PROX_FAR_M = 50;
-const PROX_NEAR_M = 20;
+const PROX_ALERT_M = 20; // detector alarm only at ≤ 20 m
 
 function haversineMeters(lat1, lng1, lat2, lng2) {
   const R = 6371000;
@@ -1305,9 +1304,9 @@ function startWebAudioKeepAlive() {
   const data = buffer.getChannelData(0);
   for (let i = 0; i < data.length; i++) {
     const t = i / rate;
-    // Soft 1 Hz pulse envelope * 40 Hz tone at ~1.5% amplitude
+    // Soft 1 Hz pulse * 40 Hz at ~0.15% — nearly inaudible keep-alive (not the alarm)
     const env = 0.5 + 0.5 * Math.sin(2 * Math.PI * 1 * t);
-    data[i] = Math.sin(2 * Math.PI * 40 * t) * 0.015 * env;
+    data[i] = Math.sin(2 * Math.PI * 40 * t) * 0.0015 * env;
   }
 
   const src = ctx.createBufferSource();
@@ -1324,9 +1323,9 @@ function startWebAudioKeepAlive() {
 function startHtmlAudioKeepAlive() {
   // Second persistence path for iOS Safari (HTML5 media session).
   if (!detector.htmlLoop) {
-    detector.htmlLoop = new Audio(makeBeepDataUrl(55, 900, 0.04));
+    detector.htmlLoop = new Audio(makeBeepDataUrl(40, 1200, 0.008));
     detector.htmlLoop.loop = true;
-    detector.htmlLoop.volume = 0.04;
+    detector.htmlLoop.volume = 0.008; // nearly inaudible — not the alarm
     detector.htmlLoop.setAttribute("playsinline", "");
     detector.htmlLoop.setAttribute("webkit-playsinline", "");
   }
@@ -1430,38 +1429,29 @@ function scheduleBeepNow(intensity, freqOverride, durOverride) {
   }
 }
 
-/** Beep interval (seconds) from distance in meters — metal-detector zones. */
+/** Beep interval (seconds). Returns null when > 20 m (no alarm). */
 function intervalForDistanceM(distM) {
-  if (!isFinite(distM)) return 2.0;
-  if (distM <= PROX_NEAR_M) {
-    // Rapid continuous alarm under 20 m (80–220 ms)
-    return 0.08 + Math.max(0, distM / PROX_NEAR_M) * 0.14;
-  }
-  if (distM <= PROX_FAR_M) {
-    // Faster between 20–50 m (220–900 ms)
-    const t = (distM - PROX_NEAR_M) / (PROX_FAR_M - PROX_NEAR_M);
-    return 0.22 + t * 0.68;
-  }
-  // Slow far pulse (> 50 m)
-  const t = Math.min(1, (distM - PROX_FAR_M) / 80);
-  return 0.9 + t * 1.1;
+  if (!isFinite(distM) || distM > PROX_ALERT_M) return null;
+  // 20 m → ~450 ms · 0 m → ~80 ms
+  const t = Math.max(0, Math.min(1, distM / PROX_ALERT_M));
+  return 0.08 + t * 0.37;
 }
 
 function intensityForDistanceM(distM) {
-  if (distM <= PROX_NEAR_M) return 0.95;
-  if (distM <= PROX_FAR_M) return 0.55;
-  return 0.25;
+  if (!isFinite(distM) || distM > PROX_ALERT_M) return 0;
+  return 0.45 + (1 - distM / PROX_ALERT_M) * 0.5;
 }
 
 function zoneForDistanceM(distM) {
-  if (distM <= PROX_NEAR_M) return "hot";
-  if (distM <= PROX_FAR_M) return "near";
+  if (!isFinite(distM)) return "far";
+  if (distM <= 8) return "hot";
+  if (distM <= PROX_ALERT_M) return "near";
   return "far";
 }
 
 /**
  * Lookahead scheduler: queue ~1.25s of beeps on the audio clock.
- * Safe to call from GPS callbacks while the screen is locked.
+ * Beeps ONLY when distance ≤ 20 m.
  */
 function pumpBeepScheduler() {
   if (!detector.running || !detector.ctx || !state.playing || state.finished) return;
@@ -1475,6 +1465,13 @@ function pumpBeepScheduler() {
 
   const distM = detector.lastDistM;
   const interval = intervalForDistanceM(distM);
+
+  // Outside 20 m — no detector beeps.
+  if (interval == null) {
+    detector.nextBeepTime = 0;
+    return;
+  }
+
   const intensity = intensityForDistanceM(distM);
   const horizon = ctx.currentTime + 1.25;
 
@@ -1488,8 +1485,8 @@ function pumpBeepScheduler() {
     detector.nextBeepTime += interval;
   }
 
-  // Haptics only when hot AND page visible (OS usually blocks vibrate when locked).
-  if (!document.hidden && distM <= PROX_NEAR_M && navigator.vibrate) {
+  // Strong haptic under 8 m when screen is visible.
+  if (!document.hidden && distM <= 8 && navigator.vibrate) {
     try {
       navigator.vibrate([500, 200, 500]);
     } catch { /* ignore */ }
@@ -1596,18 +1593,18 @@ function updateProximityUI() {
 
   updateProximityFromDistanceM(distM);
 
-  const closeness =
-    distM <= PROX_NEAR_M ? 1 :
-    distM <= PROX_FAR_M ? 0.65 :
-    Math.max(0.1, 1 - distM / 120);
+  const inRange = distM <= PROX_ALERT_M;
+  const closeness = inRange
+    ? Math.max(0.15, 1 - distM / PROX_ALERT_M)
+    : 0;
 
   const label = distM >= 100 ? `${Math.round(distM)} m` : `${distM.toFixed(1)} m`;
   dom.distance.textContent = label;
-  dom.distance.style.color = detector.zone === "hot" ? "var(--gold)" : "";
+  dom.distance.style.color = inRange ? "var(--gold)" : "";
 
   if (dom.stripDistance) {
     dom.stripDistance.textContent = label;
-    dom.stripDistance.style.color = detector.zone === "hot" ? "var(--gold)" : "";
+    dom.stripDistance.style.color = inRange ? "var(--gold)" : "";
   }
   if (dom.stripFill) dom.stripFill.style.width = `${closeness * 100}%`;
   if (dom.detectorFill) dom.detectorFill.style.width = `${closeness * 100}%`;
@@ -1616,9 +1613,9 @@ function updateProximityUI() {
     dom.detectorDistance.classList.toggle("hot", detector.zone === "hot");
   }
   if (dom.detectorSignal) {
-    if (detector.zone === "hot") dom.detectorSignal.textContent = "ALARM · < 20 m";
-    else if (detector.zone === "near") dom.detectorSignal.textContent = "SIGNAL · 20–50 m";
-    else dom.detectorSignal.textContent = "SCANNING · > 50 m";
+    if (detector.zone === "hot") dom.detectorSignal.textContent = "ALARM · < 8 m";
+    else if (detector.zone === "near") dom.detectorSignal.textContent = "SIGNAL · ≤ 20 m";
+    else dom.detectorSignal.textContent = "QUIET · > 20 m (no alarm)";
   }
 }
 
@@ -2135,7 +2132,10 @@ function beginPlay() {
     toggleCompass(true);
   }
   startProximityDetector();
-  playDetectorBeep(0.35);
+  // Only chirp if already inside 20 m (e.g. debug near spawn).
+  if (state.nearest.id !== -1 && ftToM(state.nearest.distance) <= PROX_ALERT_M) {
+    playDetectorBeep(0.35);
+  }
   acquireWakeLock();
   startBackgroundKeepAlive();
   updateBackgroundStatus();

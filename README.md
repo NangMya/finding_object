@@ -84,7 +84,7 @@ after the screen locks:
 4. **GPS `watchPosition`** still updates distance on many phones while media is playing
 5. Screen **Wake Lock** when the OS allows it
 
-**Zones:** `>50 m` slow beep · `20–50 m` faster · `<20 m` rapid alarm (+ vibrate when screen is on)
+**Zones:** distance always shown · alarm beeps **only at ≤ 20 m** (faster as you close in) · rapid alarm + vibrate under **~8 m** when screen is on
 
 **Limits:** Some phones still pause web pages after long lock periods. Vibration is often
 blocked while locked (OS policy). Keep media volume up; do not force-stop the browser.
