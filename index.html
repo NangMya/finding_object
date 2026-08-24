@@ -679,6 +679,9 @@
 
     <input id="username" type="text" placeholder="Enter your name…" maxlength="16" autocomplete="off" />
     <button id="btn-play" class="btn-primary">PLAY</button>
+    <button id="btn-test-sound" type="button" class="btn-ghost" style="width:100%;margin-top:10px;background:#334155">
+      🔊 TEST SOUND
+    </button>
 
     <p id="best-score" class="best-score hidden"></p>
 
@@ -896,13 +899,13 @@ const gps = {
 };
 
 const detector = {
-  ctx: null,
   unlocked: false,
   nextBeepAt: 0,
   running: false,
   lastDistFt: Infinity,
   _tick: null,
-  _raf: 0,
+  clips: null,   // { low, mid, high, prime } HTMLAudioElement
+  pool: [],      // reusable Audio nodes so beeps don't cut each other
 };
 
 const ar = {
@@ -1204,111 +1207,145 @@ function formatDistanceM(ft) {
 }
 
 /* =========================================================================
-   Metal detector — proximity audio + meters display
+   Metal detector — HTML5 Audio beeps (more reliable on phones than WebAudio)
    ========================================================================= */
 
-function initDetectorAudio() {
-  if (detector.ctx) return;
-  const AudioCtx = window.AudioContext || window.webkitAudioContext;
-  if (!AudioCtx) return;
-  detector.ctx = new AudioCtx();
+function makeBeepDataUrl(freq, durationMs, volume) {
+  const sampleRate = 22050;
+  const n = Math.floor((sampleRate * durationMs) / 1000);
+  const dataSize = n * 2;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  const writeStr = (offset, str) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, "data");
+  view.setUint32(40, dataSize, true);
+
+  for (let i = 0; i < n; i++) {
+    const attack = Math.min(1, i / (sampleRate * 0.008));
+    const decay = 1 - i / n;
+    const env = attack * decay;
+    const sample = Math.sin((2 * Math.PI * freq * i) / sampleRate) * volume * env;
+    view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, sample)) * 32767, true);
+  }
+
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return "data:audio/wav;base64," + btoa(binary);
 }
 
-/** Must run during the PLAY tap — iOS/Android block audio otherwise. */
-async function unlockDetectorAudio() {
-  initDetectorAudio();
-  if (!detector.ctx) return false;
+function buildDetectorClips() {
+  if (detector.clips) return;
+  detector.clips = {
+    low: makeBeepDataUrl(300, 140, 0.85),
+    mid: makeBeepDataUrl(520, 110, 0.9),
+    high: makeBeepDataUrl(820, 90, 0.95),
+    prime: makeBeepDataUrl(660, 200, 0.9),
+  };
+}
+
+function playClip(url, volume) {
+  buildDetectorClips();
   try {
-    if (detector.ctx.state === "suspended") await detector.ctx.resume();
-    // Inaudible prime opens the audio path on iOS Safari.
-    const t = detector.ctx.currentTime;
-    const osc = detector.ctx.createOscillator();
-    const g = detector.ctx.createGain();
-    g.gain.value = 0.001;
-    osc.frequency.value = 440;
-    osc.connect(g);
-    g.connect(detector.ctx.destination);
-    osc.start(t);
-    osc.stop(t + 0.02);
-    detector.unlocked = detector.ctx.state === "running";
-    return detector.unlocked;
+    const a = new Audio(url);
+    a.volume = Math.max(0, Math.min(1, volume));
+    a.setAttribute("playsinline", "");
+    a.setAttribute("webkit-playsinline", "");
+    const p = a.play();
+    if (p && typeof p.then === "function") {
+      p.then(() => { detector.unlocked = true; }).catch(() => {
+        detector.unlocked = false;
+        updateBackgroundStatus();
+      });
+    }
+    return a;
   } catch {
+    return null;
+  }
+}
+
+/** Must run during a user tap (PLAY / D-pad). Plays an audible confirmation. */
+async function unlockDetectorAudio(playConfirm) {
+  buildDetectorClips();
+  try {
+    const a = new Audio(detector.clips.prime);
+    a.volume = playConfirm === false ? 0.05 : 0.85;
+    a.playsInline = true;
+    await a.play();
+    detector.unlocked = true;
+    return true;
+  } catch (err) {
+    console.warn("Audio unlock failed:", err);
     detector.unlocked = false;
     return false;
   }
 }
 
 function startProximityDetector() {
-  if (detector.ctx?.state === "suspended") {
-    detector.ctx.resume().catch(() => {});
-  }
   detector.running = true;
   detector.nextBeepAt = 0;
-  if (!detector._raf) {
-    const loop = () => {
-      tickProximityDetector();
-      if (detector.running) detector._raf = requestAnimationFrame(loop);
-      else detector._raf = 0;
-    };
-    detector._raf = requestAnimationFrame(loop);
+  if (!detector._tick) {
+    // setInterval survives better than rAF when the browser is partially throttled.
+    detector._tick = setInterval(tickProximityDetector, 50);
   }
   dom.detectorStrip.classList.remove("hidden-strip");
   dom.bgStatus.classList.remove("hidden");
+  updateBackgroundStatus();
 }
 
 function stopProximityDetector() {
   detector.running = false;
-  if (detector._raf) {
-    cancelAnimationFrame(detector._raf);
-    detector._raf = 0;
+  if (detector._tick) {
+    clearInterval(detector._tick);
+    detector._tick = null;
   }
   dom.detectorStrip.classList.add("hidden-strip");
 }
 
 function playDetectorBeep(intensity) {
-  if (!detector.ctx) return;
-  if (detector.ctx.state === "suspended") {
-    detector.ctx.resume().then(() => playDetectorBeep(intensity)).catch(() => {});
-    return;
-  }
+  buildDetectorClips();
+  const clip =
+    intensity > 0.7 ? detector.clips.high :
+    intensity > 0.35 ? detector.clips.mid :
+    detector.clips.low;
+  const vol = 0.5 + intensity * 0.5;
+  playClip(clip, vol);
 
-  const t = detector.ctx.currentTime;
-  const osc = detector.ctx.createOscillator();
-  const env = detector.ctx.createGain();
-  const peak = 0.15 + intensity * 0.55;
-
-  osc.type = "square";
-  osc.frequency.value = 220 + intensity * 880;
-
-  env.gain.setValueAtTime(0.0001, t);
-  env.gain.exponentialRampToValueAtTime(Math.max(0.0002, peak), t + 0.008);
-  env.gain.exponentialRampToValueAtTime(0.0001, t + 0.09 + intensity * 0.05);
-
-  osc.connect(env);
-  env.connect(detector.ctx.destination);
-
-  osc.start(t);
-  osc.stop(t + 0.14);
-
-  // Haptic alongside every beep (not only when very close).
   if (navigator.vibrate) {
-    navigator.vibrate(Math.round(8 + intensity * 35));
+    try {
+      navigator.vibrate(Math.round(12 + intensity * 40));
+    } catch { /* ignore */ }
   }
 }
 
 function tickProximityDetector() {
   if (!detector.running || !state.playing || state.finished) return;
-  if (document.hidden) return; // browser pauses audio/JS when screen off
+  if (document.hidden) return;
   if (state.nearest.id === -1) return;
 
   const distFt = state.nearest.distance;
   const closeness = Math.max(0, Math.min(1, 1 - distFt / DETECTOR_MAX_FT));
   const now = performance.now();
 
-  const intervalMs = 1800 - closeness * 1650;
+  const intervalMs = 1600 - closeness * 1480;
   if (now >= detector.nextBeepAt) {
     playDetectorBeep(closeness);
-    detector.nextBeepAt = now + Math.max(80, intervalMs);
+    detector.nextBeepAt = now + Math.max(90, intervalMs);
   }
 }
 
@@ -1460,22 +1497,62 @@ async function releaseWakeLock() {
 }
 
 function startBackgroundKeepAlive() {
-  // Silent audio reduces browser throttling while hunting (requires prior user gesture).
+  buildDetectorClips();
+
+  // Near-silent looping clip keeps the media pipeline warm (not meant to be heard).
   if (!keepAliveAudio) {
-    keepAliveAudio = document.createElement("audio");
+    keepAliveAudio = new Audio(makeBeepDataUrl(40, 800, 0.001));
     keepAliveAudio.loop = true;
-    keepAliveAudio.src =
-      "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA";
-    keepAliveAudio.volume = 0.01;
+    keepAliveAudio.volume = 0.001;
     keepAliveAudio.setAttribute("playsinline", "");
   }
   keepAliveAudio.play().catch(() => {});
+
+  // Canvas stream as a playing "video" — helps prevent aggressive sleep on some phones.
+  let v = document.getElementById("nosleep-video");
+  if (!v) {
+    v = document.createElement("video");
+    v.id = "nosleep-video";
+    v.setAttribute("playsinline", "");
+    v.setAttribute("webkit-playsinline", "");
+    v.muted = true;
+    v.loop = true;
+    v.playsInline = true;
+    v.style.cssText =
+      "position:fixed;width:2px;height:2px;opacity:0.01;pointer-events:none;bottom:0;left:0;z-index:-1";
+    document.body.appendChild(v);
+    window.__nosleepVideo = v;
+  }
+
+  try {
+    if (!window.__nosleepStream) {
+      const c = document.createElement("canvas");
+      c.width = 2;
+      c.height = 2;
+      const ctx = c.getContext("2d");
+      const paint = () => {
+        if (!state.playing) return;
+        ctx.fillStyle = "#111";
+        ctx.fillRect(0, 0, 2, 2);
+        requestAnimationFrame(paint);
+      };
+      paint();
+      window.__nosleepStream = c.captureStream(5);
+      v.srcObject = window.__nosleepStream;
+    }
+    v.play().catch(() => {});
+  } catch {
+    /* captureStream unsupported — Wake Lock alone still helps */
+  }
 }
 
 function stopBackgroundKeepAlive() {
   if (keepAliveAudio) {
     keepAliveAudio.pause();
     keepAliveAudio.currentTime = 0;
+  }
+  if (window.__nosleepVideo) {
+    window.__nosleepVideo.pause();
   }
 }
 
@@ -1499,10 +1576,11 @@ function updateBackgroundStatus() {
 
 document.addEventListener("visibilitychange", () => {
   updateBackgroundStatus();
-  if (!document.hidden && state.playing && !state.finished && !DEBUG_MOVE) {
-    if (gps.watchId === null) startGpsWatch();
+  if (!document.hidden && state.playing && !state.finished) {
+    if (!DEBUG_MOVE && gps.watchId === null) startGpsWatch();
     acquireWakeLock();
-    if (detector.ctx?.state === "suspended") detector.ctx.resume().catch(() => {});
+    startBackgroundKeepAlive();
+    if (detector.clips) playClip(detector.clips.mid, 0.45);
   }
 });
 
@@ -1701,8 +1779,12 @@ async function play() {
 
   state.username = name;
 
-  // Unlock detector audio on the PLAY tap (required on iOS/Android).
-  await unlockDetectorAudio();
+  // Unlock detector audio DURING the PLAY tap (required on iOS/Android).
+  // Plays an audible confirmation beep so you know sound works.
+  const audioOk = await unlockDetectorAudio(true);
+  if (!audioOk) {
+    flash("Sound blocked — unmute phone media volume and tap PLAY again");
+  }
 
   if (!DEBUG_MOVE && isLocalFileUrl()) {
     alert(localFileGpsMessage());
@@ -1756,6 +1838,7 @@ async function play() {
 
   attachCompass();
   acquireWakeLock();
+  startBackgroundKeepAlive();
   if (!DEBUG_MOVE) startGpsWatch();
   else setGpsStatus("DEBUG MOVE · keyboard/pad");
 
@@ -1831,7 +1914,9 @@ function beginPlay() {
     toggleCompass(true);
   }
   startProximityDetector();
-  startBackgroundKeepAlive();
+  // Immediate first beep so the player hears the detector right away.
+  playDetectorBeep(0.25);
+  detector.nextBeepAt = performance.now() + 400;
   acquireWakeLock();
   updateBackgroundStatus();
 }
@@ -2174,6 +2259,22 @@ function saveResultImage() {
    ========================================================================= */
 
 el("btn-play").addEventListener("click", play);
+el("btn-test-sound").addEventListener("click", async () => {
+  const ok = await unlockDetectorAudio(true);
+  if (ok) {
+    setTimeout(() => playDetectorBeep(0.4), 220);
+    setTimeout(() => playDetectorBeep(0.8), 450);
+    flash("Sound OK — turn media volume up if quiet");
+  } else {
+    alert(
+      "Could not play sound.\n\n" +
+        "1. Unmute the phone (media volume, not just ringer)\n" +
+        "2. Turn off Silent / Do Not Disturb\n" +
+        "3. Tap TEST SOUND again\n" +
+        "4. Open the page over https:// (not a saved file)"
+    );
+  }
+});
 dom.username.addEventListener("keydown", (e) => { if (e.key === "Enter") play(); });
 
 el("btn-bag").addEventListener("click", openBag);
@@ -2192,10 +2293,22 @@ el("btn-quit-yes").addEventListener("click", () => {
 el("btn-again").addEventListener("click", () => location.reload());
 el("btn-save").addEventListener("click", saveResultImage);
 
-el("ctrl-fwd").addEventListener("click", () => step(1));
-el("ctrl-back").addEventListener("click", () => step(-1));
-el("ctrl-left").addEventListener("click", () => turn(-TURN_STEP));
-el("ctrl-right").addEventListener("click", () => turn(TURN_STEP));
+el("ctrl-fwd").addEventListener("click", () => {
+  unlockDetectorAudio(false);
+  step(1);
+});
+el("ctrl-back").addEventListener("click", () => {
+  unlockDetectorAudio(false);
+  step(-1);
+});
+el("ctrl-left").addEventListener("click", () => {
+  unlockDetectorAudio(false);
+  turn(-TURN_STEP);
+});
+el("ctrl-right").addEventListener("click", () => {
+  unlockDetectorAudio(false);
+  turn(TURN_STEP);
+});
 
 dom.compass.addEventListener("click", toggleCompass);
 dom.btnArBack.addEventListener("click", () => {
