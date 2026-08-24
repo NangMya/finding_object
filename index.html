@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
 <meta name="theme-color" content="#000000" />
-<meta http-equiv="Permissions-Policy" content="geolocation=(self), gyroscope=(self), accelerometer=(self)" />
+<meta http-equiv="Permissions-Policy" content="geolocation=(self), gyroscope=(self), accelerometer=(self), camera=(self)" />
 <title>Treasure Radar</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>📦</text></svg>" />
 <style>
@@ -482,6 +482,191 @@
     #controls { grid-template-columns: repeat(3, 48px); grid-template-rows: repeat(2, 48px); }
     #btn-compass { bottom: 132px; }
   }
+
+  /* ---------- Metal detector + AR ---------- */
+
+  #ar-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 350;
+    background: #000;
+    overflow: hidden;
+  }
+
+  #ar-video {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  #ar-radar-fade {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, rgba(0,0,0,0.55) 0%, transparent 35%, transparent 65%, rgba(0,0,0,0.65) 100%);
+    pointer-events: none;
+    z-index: 2;
+  }
+
+  #ar-target-wrap {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 4;
+    pointer-events: none;
+    transition: transform 0.12s ease-out, opacity 0.25s;
+  }
+
+  #ar-target {
+    font-size: 120px;
+    line-height: 1;
+    filter: drop-shadow(0 0 40px rgba(251, 191, 36, 0.9));
+    transform-origin: center bottom;
+  }
+
+  #ar-glow {
+    position: absolute;
+    left: 50%;
+    top: 55%;
+    width: 220px;
+    height: 80px;
+    transform: translate(-50%, -50%);
+    background: radial-gradient(ellipse, rgba(251,191,36,0.55) 0%, transparent 70%);
+    border-radius: 50%;
+    z-index: -1;
+  }
+
+  #ar-flash-lights {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    pointer-events: none;
+  }
+
+  #ar-flash-lights.active .flash-beam {
+    animation: flash-strobe 0.35s ease-in-out infinite alternate;
+  }
+
+  .flash-beam {
+    position: absolute;
+    width: 28%;
+    height: 28%;
+    border-radius: 18px;
+    opacity: 0;
+    box-shadow: 0 0 60px 20px currentColor;
+  }
+
+  .flash-beam.tl { top: 4%; left: 4%; color: #fbbf24; background: rgba(251,191,36,0.35); }
+  .flash-beam.tr { top: 4%; right: 4%; color: #ef4444; background: rgba(239,68,68,0.35); }
+  .flash-beam.bl { bottom: 18%; left: 4%; color: #ef4444; background: rgba(239,68,68,0.35); }
+  .flash-beam.br { bottom: 18%; right: 4%; color: #fbbf24; background: rgba(251,191,36,0.35); }
+
+  @keyframes flash-strobe {
+    0%   { opacity: 0.15; transform: scale(0.92); }
+    100% { opacity: 1; transform: scale(1.08); }
+  }
+
+  #detector-hud {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 6;
+    padding: 20px 20px max(24px, env(safe-area-inset-bottom));
+    background: linear-gradient(transparent, rgba(0,0,0,0.88));
+  }
+
+  #detector-distance {
+    font-size: 42px;
+    font-weight: 900;
+    text-align: center;
+    text-shadow: 0 2px 20px rgba(0,0,0,0.8);
+    margin-bottom: 8px;
+  }
+
+  #detector-distance.hot { color: var(--gold); animation: pulse-hot 0.5s ease-in-out infinite alternate; }
+
+  @keyframes pulse-hot {
+    from { transform: scale(1); }
+    to   { transform: scale(1.06); }
+  }
+
+  #detector-bar {
+    height: 10px;
+    border-radius: 5px;
+    background: rgba(255,255,255,0.12);
+    overflow: hidden;
+    margin-bottom: 6px;
+  }
+
+  #detector-fill {
+    height: 100%;
+    width: 0%;
+    border-radius: 5px;
+    background: linear-gradient(90deg, #22c55e, #fbbf24, #ef4444);
+    transition: width 0.15s linear;
+  }
+
+  #detector-signal { text-align: center; letter-spacing: 0.25em; }
+
+  #btn-ar-back {
+    position: absolute;
+    top: max(16px, env(safe-area-inset-top));
+    left: 16px;
+    z-index: 7;
+    padding: 10px 16px;
+    border-radius: 12px;
+    background: rgba(24,24,27,0.85);
+    border: 1px solid var(--line);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+  }
+
+  #detector-strip {
+    position: absolute;
+    top: max(72px, calc(env(safe-area-inset-top) + 56px));
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 200;
+    width: min(280px, 90vw);
+    padding: 10px 14px;
+    border-radius: 14px;
+    background: rgba(24,24,27,0.88);
+    border: 1px solid var(--line);
+    pointer-events: none;
+  }
+
+  #detector-strip.hidden-strip { opacity: 0; pointer-events: none; }
+
+  #strip-distance { font-size: 18px; font-weight: 800; text-align: center; }
+  #strip-bar { height: 6px; border-radius: 3px; background: rgba(255,255,255,0.1); margin-top: 6px; overflow: hidden; }
+  #strip-fill { height: 100%; width: 0%; background: var(--gold); transition: width 0.12s; }
+
+  #bg-status {
+    position: absolute;
+    bottom: max(168px, calc(env(safe-area-inset-bottom) + 140px));
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 210;
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    color: var(--muted);
+    background: rgba(0,0,0,0.5);
+    padding: 4px 10px;
+    border-radius: 8px;
+    pointer-events: none;
+  }
+
+  #screen-game.ar-active #world,
+  #screen-game.ar-active #player,
+  #screen-game.ar-active #minimap,
+  #screen-game.ar-active #controls,
+  #screen-game.ar-active #btn-compass { opacity: 0; pointer-events: none; }
+
+  #screen-game.ar-active #hud-top { opacity: 0.35; }
 </style>
 </head>
 <body>
@@ -499,7 +684,7 @@
 
     <div class="hint">
       <b>On a phone:</b> open this page over <b>HTTPS</b>, allow Location, then walk outdoors. Shaking does nothing.<br />
-      <b>Desktop testing:</b> open with <code>?debug=1</code> to unlock keyboard/pad without GPS.
+      <b>Desktop testing:</b> add <code>?debug=1</code> (no GPS — use keys/pad). Add <code>&amp;near=1</code> to spawn crates close for AR tests.
     </div>
     <div id="secure-warn" class="warn-box hidden"></div>
   </div>
@@ -538,6 +723,13 @@
     <p id="gps-status" class="label" style="margin-top:6px;letter-spacing:0.12em">GPS · waiting</p>
   </div>
 
+  <div id="detector-strip" class="hidden-strip">
+    <div id="strip-distance" class="mono">--- m</div>
+    <div id="strip-bar"><div id="strip-fill"></div></div>
+  </div>
+
+  <p id="bg-status" class="label hidden">GPS · tracking</p>
+
   <div id="minimap" class="hud"></div>
 
   <button id="btn-compass" class="hud">Compass: off</button>
@@ -547,6 +739,28 @@
     <button id="ctrl-left" title="Turn left">◀</button>
     <button id="ctrl-back" title="Step back">▼</button>
     <button id="ctrl-right" title="Turn right">▶</button>
+  </div>
+</div>
+
+<!-- AR discovery view (auto within ~20 m) -->
+<div id="ar-layer" class="hidden">
+  <video id="ar-video" playsinline autoplay muted></video>
+  <div id="ar-radar-fade"></div>
+  <div id="ar-flash-lights">
+    <div class="flash-beam tl"></div>
+    <div class="flash-beam tr"></div>
+    <div class="flash-beam bl"></div>
+    <div class="flash-beam br"></div>
+  </div>
+  <div id="ar-target-wrap">
+    <div id="ar-glow"></div>
+    <div id="ar-target">📦</div>
+  </div>
+  <button id="btn-ar-back" type="button">← RADAR</button>
+  <div id="detector-hud">
+    <div id="detector-distance" class="mono">--- m</div>
+    <div id="detector-bar"><div id="detector-fill"></div></div>
+    <p id="detector-signal" class="label">DETECTOR · scanning</p>
   </div>
 </div>
 
@@ -633,7 +847,20 @@ const GPS_MAX_ACCURACY_FT = 50;   // ignore fixes worse than this
 const GPS_MIN_MOVE_FT = 3;        // ignore tiny GPS noise hops
 const GPS_FIX_TIMEOUT_MS = 20000;
 
+// Metal detector + AR ranges (real-world meters)
+const M_PER_FT = 1 / FT_PER_M;
+const AR_RANGE_M = 20;
+const AR_RANGE_FT = AR_RANGE_M * FT_PER_M;
+const FLASH_RANGE_M = 8;
+const FLASH_RANGE_FT = FLASH_RANGE_M * FT_PER_M;
+const DETECTOR_MAX_FT = ROOM_SIZE_FT / 2;
+
 const DEBUG_MOVE = new URLSearchParams(location.search).has("debug");
+// ?debug=1&near=1 — spawn crates ~8–18 m away for quick AR/detector testing while seated
+const DEBUG_NEAR =
+  DEBUG_MOVE &&
+  (new URLSearchParams(location.search).has("near") ||
+    new URLSearchParams(location.search).get("debug") === "near");
 const STORAGE_KEY = "treasure_radar_save";
 
 /* =========================================================================
@@ -657,13 +884,33 @@ const state = {
   compassEnabled: false,
   gpsReady: false,
   gpsAccuracyFt: null,
+  arManualRadar: false, // user chose radar view while still in AR range
+  bgPaused: false,
 };
 
 const gps = {
   watchId: null,
-  origin: null,       // { lat, lng } locked on first good fix
-  lastAccepted: null, // last position that moved the player
+  origin: null,
+  lastAccepted: null,
+  hiddenUpdates: 0,
 };
+
+const detector = {
+  ctx: null,
+  gain: null,
+  nextBeepAt: 0,
+  running: false,
+  lastDistFt: Infinity,
+};
+
+const ar = {
+  stream: null,
+  active: false,
+  videoReady: false,
+};
+
+let wakeLock = null;
+let keepAliveAudio = null;
 
 const el = (id) => document.getElementById(id);
 
@@ -701,6 +948,19 @@ const dom = {
   resultTime: el("result-time"),
   resultWalked: el("result-walked"),
   resultPoints: el("result-points"),
+  detectorStrip: el("detector-strip"),
+  stripDistance: el("strip-distance"),
+  stripFill: el("strip-fill"),
+  bgStatus: el("bg-status"),
+  arLayer: el("ar-layer"),
+  arVideo: el("ar-video"),
+  arTargetWrap: el("ar-target-wrap"),
+  arTarget: el("ar-target"),
+  arFlash: el("ar-flash-lights"),
+  detectorDistance: el("detector-distance"),
+  detectorFill: el("detector-fill"),
+  detectorSignal: el("detector-signal"),
+  btnArBack: el("btn-ar-back"),
 };
 
 /* =========================================================================
@@ -776,8 +1036,13 @@ function buzz(ms) {
 
 function spawnBoxes() {
   const center = ROOM_SIZE_FT / 2;
-  const minRadius = MIN_RADIUS;
-  const maxRadius = Math.max(minRadius + 1, ROOM_SIZE_FT / 2 - 5);
+  let minRadius = MIN_RADIUS;
+  let maxRadius = Math.max(minRadius + 1, ROOM_SIZE_FT / 2 - 5);
+
+  if (DEBUG_NEAR) {
+    minRadius = 8 * FT_PER_M;
+    maxRadius = 18 * FT_PER_M;
+  }
 
   state.boxes = [];
   for (let i = 0; i < BOX_COUNT; i++) {
@@ -903,7 +1168,7 @@ function render() {
   dom.targetArc.style.opacity = state.nearest.id === -1 ? "0" : "1";
 
   dom.distance.textContent =
-    state.nearest.id === -1 ? "---" : `${state.nearest.distance.toFixed(1)} FT`;
+    state.nearest.id === -1 ? "---" : formatDistanceM(state.nearest.distance);
 
   for (const box of state.boxes) {
     box.node.classList.toggle("hidden", box.collected);
@@ -922,7 +1187,282 @@ function render() {
   dom.statPoints.textContent = state.points;
   dom.bagCount.textContent = state.inventory.length;
   dom.bagCount.classList.toggle("hidden", state.inventory.length === 0);
+
+  updateProximityUI();
+  updateARView();
 }
+
+function ftToM(ft) {
+  return ft * M_PER_FT;
+}
+
+function formatDistanceM(ft) {
+  const m = ftToM(ft);
+  return m >= 100 ? `${Math.round(m)} m` : `${m.toFixed(1)} m`;
+}
+
+/* =========================================================================
+   Metal detector — proximity audio + meters display
+   ========================================================================= */
+
+function initDetectorAudio() {
+  if (detector.ctx) return;
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtx) return;
+  detector.ctx = new AudioCtx();
+  detector.gain = detector.ctx.createGain();
+  detector.gain.gain.value = 0;
+  detector.gain.connect(detector.ctx.destination);
+}
+
+function startProximityDetector() {
+  initDetectorAudio();
+  if (detector.ctx && detector.ctx.state === "suspended") {
+    detector.ctx.resume().catch(() => {});
+  }
+  detector.running = true;
+  detector.nextBeepAt = 0;
+  if (!detector._tick) {
+    detector._tick = setInterval(tickProximityDetector, 40);
+  }
+  dom.detectorStrip.classList.remove("hidden-strip");
+  dom.bgStatus.classList.remove("hidden");
+}
+
+function stopProximityDetector() {
+  detector.running = false;
+  if (detector._tick) {
+    clearInterval(detector._tick);
+    detector._tick = null;
+  }
+  if (detector.gain) detector.gain.gain.value = 0;
+  dom.detectorStrip.classList.add("hidden-strip");
+}
+
+function playDetectorBeep(intensity) {
+  if (!detector.ctx || !detector.gain) return;
+  const t = detector.ctx.currentTime;
+  const osc = detector.ctx.createOscillator();
+  const env = detector.ctx.createGain();
+  osc.type = "square";
+  osc.frequency.value = 280 + intensity * 720;
+  env.gain.setValueAtTime(0.0001, t);
+  env.gain.exponentialRampToValueAtTime(0.08 + intensity * 0.35, t + 0.01);
+  env.gain.exponentialRampToValueAtTime(0.0001, t + 0.07 + intensity * 0.04);
+  osc.connect(env);
+  env.connect(detector.gain);
+  osc.start(t);
+  osc.stop(t + 0.12);
+  if (navigator.vibrate && intensity > 0.65) {
+    navigator.vibrate(Math.round(20 + intensity * 40));
+  }
+}
+
+function tickProximityDetector() {
+  if (!detector.running || !state.playing || state.finished) return;
+  if (state.nearest.id === -1) return;
+
+  const distFt = state.nearest.distance;
+  const maxFt = DETECTOR_MAX_FT;
+  const closeness = Math.max(0, Math.min(1, 1 - distFt / maxFt));
+  const now = performance.now();
+
+  // Faster beeps + louder as you approach (metal-detector style).
+  const intervalMs = 1800 - closeness * 1650;
+  if (now >= detector.nextBeepAt) {
+    playDetectorBeep(closeness);
+    detector.nextBeepAt = now + Math.max(80, intervalMs);
+  }
+}
+
+function updateProximityUI() {
+  if (!state.playing || state.nearest.id === -1) {
+    dom.distance.textContent = "---";
+    if (dom.stripDistance) dom.stripDistance.textContent = "--- m";
+    return;
+  }
+
+  const distFt = state.nearest.distance;
+  const distM = ftToM(distFt);
+  const closeness = Math.max(0, Math.min(1, 1 - distFt / DETECTOR_MAX_FT));
+
+  dom.distance.textContent = formatDistanceM(distFt);
+  dom.distance.style.color = closeness > 0.75 ? "var(--gold)" : "";
+
+  if (dom.stripDistance) {
+    dom.stripDistance.textContent = formatDistanceM(distFt);
+    dom.stripDistance.style.color = closeness > 0.75 ? "var(--gold)" : "";
+  }
+  if (dom.stripFill) dom.stripFill.style.width = `${closeness * 100}%`;
+  if (dom.detectorFill) dom.detectorFill.style.width = `${closeness * 100}%`;
+  if (dom.detectorDistance) {
+    dom.detectorDistance.textContent = formatDistanceM(distFt);
+    dom.detectorDistance.classList.toggle("hot", distM <= FLASH_RANGE_M);
+  }
+  if (dom.detectorSignal) {
+    if (distM <= FLASH_RANGE_M) dom.detectorSignal.textContent = "SIGNAL · HOT!";
+    else if (distM <= AR_RANGE_M) dom.detectorSignal.textContent = "SIGNAL · STRONG";
+    else if (closeness > 0.4) dom.detectorSignal.textContent = "SIGNAL · rising";
+    else dom.detectorSignal.textContent = "DETECTOR · scanning";
+  }
+
+  detector.lastDistFt = distFt;
+}
+
+/* =========================================================================
+   AR view — camera overlay within ~20 m
+   ========================================================================= */
+
+async function ensureARCamera() {
+  if (ar.stream || !navigator.mediaDevices?.getUserMedia) return false;
+  try {
+    ar.stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false,
+    });
+    dom.arVideo.srcObject = ar.stream;
+    await dom.arVideo.play();
+    ar.videoReady = true;
+    return true;
+  } catch {
+    ar.videoReady = false;
+    return false;
+  }
+}
+
+function stopARCamera() {
+  if (ar.stream) {
+    ar.stream.getTracks().forEach((t) => t.stop());
+    ar.stream = null;
+  }
+  if (dom.arVideo) dom.arVideo.srcObject = null;
+  ar.videoReady = false;
+  ar.active = false;
+  dom.arLayer.classList.add("hidden");
+  dom.screenGame.classList.remove("ar-active");
+}
+
+function shouldShowAR() {
+  if (!state.playing || state.finished || state.nearest.id === -1) return false;
+  if (state.arManualRadar) return false;
+  return ftToM(state.nearest.distance) <= AR_RANGE_M;
+}
+
+async function updateARView() {
+  if (state.nearest.id !== -1 && ftToM(state.nearest.distance) > AR_RANGE_M + 3) {
+    state.arManualRadar = false;
+  }
+
+  if (!shouldShowAR()) {
+    if (ar.active) {
+      ar.active = false;
+      dom.arLayer.classList.add("hidden");
+      dom.screenGame.classList.remove("ar-active");
+    }
+    if (dom.arFlash) dom.arFlash.classList.remove("active");
+    return;
+  }
+
+  if (!ar.videoReady) await ensureARCamera();
+
+  ar.active = true;
+  dom.arLayer.classList.remove("hidden");
+  dom.screenGame.classList.add("ar-active");
+
+  const distFt = state.nearest.distance;
+  const distM = ftToM(distFt);
+  const bearingToTarget = state.nearest.angle * (Math.PI / 180);
+  const rel = ((bearingToTarget - state.heading + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+  const relDeg = rel * (180 / Math.PI);
+
+  // Horizontal placement from relative bearing (-90..90 visible arc).
+  const maxOffset = innerWidth * 0.38;
+  const xOff = (relDeg / 55) * maxOffset;
+  const clampedX = Math.max(-maxOffset, Math.min(maxOffset, xOff));
+
+  // Scale up as player approaches (large within 20 m, huge under 8 m).
+  const scale = Math.min(3.8, 0.55 + (1 - distM / AR_RANGE_M) * 2.8 + (distM < FLASH_RANGE_M ? 0.6 : 0));
+  const yOff = Math.min(80, (1 - distM / AR_RANGE_M) * 60);
+
+  dom.arTargetWrap.style.transform =
+    `translate(calc(-50% + ${clampedX}px), calc(-50% + ${yOff}px)) scale(${scale})`;
+  dom.arTargetWrap.style.opacity = Math.abs(relDeg) > 85 ? "0.25" : "1";
+
+  const flashOn = distM <= FLASH_RANGE_M;
+  dom.arFlash.classList.toggle("active", flashOn);
+
+  dom.arTarget.style.cursor = distFt <= PICKUP_RANGE ? "pointer" : "default";
+  dom.arTargetWrap.style.pointerEvents = distFt <= PICKUP_RANGE ? "auto" : "none";
+}
+
+function collectNearestFromAR() {
+  const box = state.boxes.find((b) => b.id === state.nearest.id && !b.collected);
+  if (box) collect(box);
+}
+
+/* =========================================================================
+   Background tracking — wake lock + keep-alive (best effort)
+   ========================================================================= */
+
+async function acquireWakeLock() {
+  try {
+    if ("wakeLock" in navigator) {
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => { wakeLock = null; });
+    }
+  } catch {
+    /* denied or unsupported */
+  }
+}
+
+async function releaseWakeLock() {
+  try {
+    if (wakeLock) await wakeLock.release();
+  } catch { /* ignore */ }
+  wakeLock = null;
+}
+
+function startBackgroundKeepAlive() {
+  // Silent audio reduces browser throttling while hunting (requires prior user gesture).
+  if (!keepAliveAudio) {
+    keepAliveAudio = document.createElement("audio");
+    keepAliveAudio.loop = true;
+    keepAliveAudio.src =
+      "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA";
+    keepAliveAudio.volume = 0.01;
+    keepAliveAudio.setAttribute("playsinline", "");
+  }
+  keepAliveAudio.play().catch(() => {});
+}
+
+function stopBackgroundKeepAlive() {
+  if (keepAliveAudio) {
+    keepAliveAudio.pause();
+    keepAliveAudio.currentTime = 0;
+  }
+}
+
+function updateBackgroundStatus() {
+  if (!dom.bgStatus || !state.playing) return;
+  if (document.hidden) {
+    state.bgPaused = true;
+    dom.bgStatus.textContent = `GPS · background (${gps.hiddenUpdates} fixes)`;
+    dom.bgStatus.style.color = "#fbbf24";
+  } else {
+    state.bgPaused = false;
+    dom.bgStatus.textContent = wakeLock ? "GPS · tracking · screen awake" : "GPS · tracking";
+    dom.bgStatus.style.color = "";
+  }
+}
+
+document.addEventListener("visibilitychange", () => {
+  updateBackgroundStatus();
+  if (!document.hidden && state.playing && !state.finished && !DEBUG_MOVE) {
+    if (gps.watchId === null) startGpsWatch();
+    acquireWakeLock();
+    if (detector.ctx?.state === "suspended") detector.ctx.resume().catch(() => {});
+  }
+});
 
 function tickClock() {
   if (!state.playing || state.finished) return;
@@ -1178,8 +1718,15 @@ async function play() {
 
 function resetRun() {
   stopGpsWatch();
+  stopProximityDetector();
+  stopARCamera();
+  stopBackgroundKeepAlive();
+  releaseWakeLock();
   state.playing = false;
   state.finished = false;
+  state.arManualRadar = false;
+  state.bgPaused = false;
+  gps.hiddenUpdates = 0;
   state.pos = { x: ROOM_SIZE_FT / 2, y: ROOM_SIZE_FT / 2 };
   state.heading = 0;
   state.inventory = [];
@@ -1232,10 +1779,15 @@ function showCountdownFrame(text) {
 function beginPlay() {
   state.playing = true;
   state.startedAt = Date.now();
+  state.arManualRadar = false;
+  gps.hiddenUpdates = 0;
   if (!DEBUG_MOVE && !state.compassEnabled) {
-    // Auto-enable compass once the hunt starts — facing matters outdoors.
     toggleCompass(true);
   }
+  startProximityDetector();
+  startBackgroundKeepAlive();
+  acquireWakeLock();
+  updateBackgroundStatus();
 }
 
 function finish(quit) {
@@ -1243,6 +1795,10 @@ function finish(quit) {
   state.finished = true;
   state.playing = false;
   stopGpsWatch();
+  stopProximityDetector();
+  stopARCamera();
+  stopBackgroundKeepAlive();
+  releaseWakeLock();
   recordRun();
 
   dom.resultTitle.textContent = quit ? "MISSION ABORTED" : "MISSION COMPLETE";
@@ -1282,12 +1838,12 @@ function startGpsWatch() {
     onGpsUpdate,
     (err) => {
       setGpsStatus(`GPS · error ${err.code}`);
-      flash("GPS signal lost — keep moving outdoors.");
+      if (!document.hidden) flash("GPS signal lost — keep moving outdoors.");
     },
     {
       enableHighAccuracy: true,
-      maximumAge: 1000,
-      timeout: 15000,
+      maximumAge: document.hidden ? 5000 : 1000,
+      timeout: 20000,
     }
   );
 }
@@ -1301,6 +1857,11 @@ function stopGpsWatch() {
 
 function onGpsUpdate(position) {
   if (state.finished) return;
+
+  if (document.hidden) {
+    gps.hiddenUpdates++;
+    updateBackgroundStatus();
+  }
 
   const { latitude: lat, longitude: lng, accuracy } = position.coords;
   const accuracyFt = accuracy * FT_PER_M;
@@ -1344,7 +1905,8 @@ function onGpsUpdate(position) {
   }
 
   applyPosition(next.x, next.y, { countWalk: true, from });
-  if (hopFt >= 6) buzz(25);
+  if (hopFt >= 6 && !document.hidden) buzz(25);
+  updateBackgroundStatus();
 }
 
 /* =========================================================================
@@ -1590,6 +2152,11 @@ el("ctrl-left").addEventListener("click", () => turn(-TURN_STEP));
 el("ctrl-right").addEventListener("click", () => turn(TURN_STEP));
 
 dom.compass.addEventListener("click", toggleCompass);
+dom.btnArBack.addEventListener("click", () => {
+  state.arManualRadar = true;
+  updateARView();
+});
+dom.arTarget.addEventListener("click", collectNearestFromAR);
 
 window.addEventListener("keydown", onKeyDown);
 window.addEventListener("resize", resizeFx);
@@ -1604,7 +2171,7 @@ el("tagline").innerHTML =
 
 if (DEBUG_MOVE) {
   el("tagline").innerHTML +=
-    `<br /><span style="color:#fbbf24">Debug mode: keyboard/pad movement enabled.</span>`;
+    `<br /><span style="color:#fbbf24">Sandbox: no GPS — use ▲◀▶▼ or WASD to move in place.${DEBUG_NEAR ? " Crates spawned ~8–18 m away." : ""}</span>`;
 }
 
 const secureWarn = el("secure-warn");

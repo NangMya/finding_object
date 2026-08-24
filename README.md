@@ -15,7 +15,24 @@ dependencies.
 (`file://`, `content://`). Upload to a server and open over **HTTPS**.
 
 - **Phone (real play):** `https://your-domain/…/index.html` — allow Location, walk outdoors.
-- **Desktop testing:** `https://…/index.html?debug=1` or localhost with `?debug=1` for keyboard/pad.
+- **Sandbox (seated, no walking):** `?debug=1&near=1` — virtual movement via D-pad/keys (see below).
+
+## Sandbox testing (sit in one place)
+
+Add **`?debug=1`** to skip GPS and move with the keyboard or on-screen D-pad:
+
+```
+https://your-domain.com/index.html?debug=1&near=1
+```
+
+| Flag | What it does |
+| --- | --- |
+| `?debug=1` | No GPS — **WASD** / **arrow keys** (PC) or **▲◀▼▶ pad** (phone) |
+| `&near=1` | Crates spawn only **8–18 m** away (few taps to reach AR) |
+
+**Seated test flow:** PLAY → turn with **◀ ▶** toward the yellow arc → tap **▲** to step forward → hear detector beeps → under 20 m AR opens → under 8 m flash lights → tap crate to collect.
+
+Radar + detector work from a local file in debug mode; **AR camera** still needs **HTTPS** or localhost on most phones.
 
 ## Testing on a phone
 
@@ -43,6 +60,21 @@ stand still until the HUD shows `GPS · locked`, then walk toward the target.
 4. Some hosts/CDNs send `Permissions-Policy: geolocation=()` which blocks GPS — remove that
    header or allow geolocation for your site.
 5. For desktop layout testing only, use `?debug=1` (no GPS required).
+
+## Metal detector + AR discovery
+
+While hunting, the game behaves like a **gold/metal detector**:
+
+- **Distance** — target range shown continuously in **meters** (HUD + detector strip).
+- **Audio alarm** — beeps faster and higher-pitched as you get closer (Web Audio).
+- **AR view** — within **~20 m**, the rear camera opens and a large crate appears aligned to compass bearing; tap it when green/in range to collect.
+- **Flash alert** — within **~8 m**, corner strobe lights pulse with the alarm.
+
+Tap **← RADAR** in AR to return to the map view (AR re-opens when you enter 20 m again).
+
+### Background / screen off
+
+The game uses **Wake Lock** (keeps screen on), silent audio keep-alive, and continuous `watchPosition` to reduce pauses. **However**, mobile browsers often **suspend web pages when the screen locks** — GPS/audio/AR may stop until you unlock the phone. This is a browser limit; a native app would be needed for guaranteed background tracking.
 
 ## Controls
 
