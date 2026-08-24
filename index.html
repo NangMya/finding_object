@@ -686,8 +686,8 @@
     <p id="best-score" class="best-score hidden"></p>
 
     <div class="hint">
-      <b>On a phone:</b> open this page over <b>HTTPS</b>, allow Location, then walk outdoors. Shaking does nothing.<br />
-      <b>Desktop testing:</b> add <code>?debug=1</code> (no GPS — use keys/pad). Add <code>&amp;near=1</code> to spawn crates close for AR tests.
+      <b>On a phone:</b> open over <b>HTTPS</b>, tap PLAY (unlocks audio + GPS), then walk. A quiet pulse keeps hunting alive with the screen locked.<br />
+      <b>Sandbox:</b> <code>?debug=1&amp;near=1</code> — D-pad / WASD, no GPS walk needed.
     </div>
     <div id="secure-warn" class="warn-box hidden"></div>
   </div>
@@ -900,12 +900,17 @@ const gps = {
 
 const detector = {
   unlocked: false,
-  nextBeepAt: 0,
   running: false,
-  lastDistFt: Infinity,
-  _tick: null,
-  clips: null,   // { low, mid, high, prime } HTMLAudioElement
-  pool: [],      // reusable Audio nodes so beeps don't cut each other
+  lastDistM: Infinity,
+  zone: "far",          // far | near | hot
+  // Web Audio — beeps are scheduled on the audio clock (survives main-thread throttle)
+  ctx: null,
+  master: null,
+  keepAliveNode: null,
+  nextBeepTime: 0,      // AudioContext seconds
+  schedulerId: null,
+  // HTML5 Audio backup loop (helps iOS keep the page alive)
+  htmlLoop: null,
 };
 
 const ar = {
@@ -1207,8 +1212,41 @@ function formatDistanceM(ft) {
 }
 
 /* =========================================================================
-   Metal detector — HTML5 Audio beeps (more reliable on phones than WebAudio)
+   Metal detector — background-capable proximity audio
+   Strategy:
+   1) Unlock AudioContext + HTML5 loop on user gesture (PLAY)
+   2) Continuous silent WebAudio buffer keeps the audio thread alive when locked
+   3) Beeps are SCHEDULED on AudioContext.currentTime (not setInterval)
+      so they keep firing even if the main JS thread is heavily throttled
+   4) GPS watchPosition still delivers fixes in background on many phones
+      while a media session is active
    ========================================================================= */
+
+const PROX_FAR_M = 50;
+const PROX_NEAR_M = 20;
+
+function haversineMeters(lat1, lng1, lat2, lng2) {
+  const R = 6371000;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+function feetOffsetToLatLng(xFt, yFt) {
+  if (!gps.origin) return null;
+  const eastFt = xFt - ROOM_SIZE_FT / 2;
+  const northFt = ROOM_SIZE_FT / 2 - yFt;
+  const mPerDegLat = 111320;
+  const mPerDegLng = 111320 * Math.cos((gps.origin.lat * Math.PI) / 180);
+  return {
+    lat: gps.origin.lat + (northFt / FT_PER_M) / mPerDegLat,
+    lng: gps.origin.lng + (eastFt / FT_PER_M) / mPerDegLng,
+  };
+}
 
 function makeBeepDataUrl(freq, durationMs, volume) {
   const sampleRate = 22050;
@@ -1216,11 +1254,9 @@ function makeBeepDataUrl(freq, durationMs, volume) {
   const dataSize = n * 2;
   const buffer = new ArrayBuffer(44 + dataSize);
   const view = new DataView(buffer);
-
   const writeStr = (offset, str) => {
     for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
   };
-
   writeStr(0, "RIFF");
   view.setUint32(4, 36 + dataSize, true);
   writeStr(8, "WAVE");
@@ -1234,61 +1270,115 @@ function makeBeepDataUrl(freq, durationMs, volume) {
   view.setUint16(34, 16, true);
   writeStr(36, "data");
   view.setUint32(40, dataSize, true);
-
   for (let i = 0; i < n; i++) {
     const attack = Math.min(1, i / (sampleRate * 0.008));
     const decay = 1 - i / n;
-    const env = attack * decay;
-    const sample = Math.sin((2 * Math.PI * freq * i) / sampleRate) * volume * env;
+    const sample = Math.sin((2 * Math.PI * freq * i) / sampleRate) * volume * attack * decay;
     view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, sample)) * 32767, true);
   }
-
   const bytes = new Uint8Array(buffer);
   let binary = "";
   for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
   return "data:audio/wav;base64," + btoa(binary);
 }
 
-function buildDetectorClips() {
-  if (detector.clips) return;
-  detector.clips = {
-    low: makeBeepDataUrl(300, 140, 0.85),
-    mid: makeBeepDataUrl(520, 110, 0.9),
-    high: makeBeepDataUrl(820, 90, 0.95),
-    prime: makeBeepDataUrl(660, 200, 0.9),
-  };
+function initWebAudio() {
+  if (detector.ctx) return detector.ctx;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  detector.ctx = new AC();
+  detector.master = detector.ctx.createGain();
+  detector.master.gain.value = 1;
+  detector.master.connect(detector.ctx.destination);
+  return detector.ctx;
 }
 
-function playClip(url, volume) {
-  buildDetectorClips();
-  try {
-    const a = new Audio(url);
-    a.volume = Math.max(0, Math.min(1, volume));
-    a.setAttribute("playsinline", "");
-    a.setAttribute("webkit-playsinline", "");
-    const p = a.play();
-    if (p && typeof p.then === "function") {
-      p.then(() => { detector.unlocked = true; }).catch(() => {
-        detector.unlocked = false;
-        updateBackgroundStatus();
-      });
-    }
-    return a;
-  } catch {
-    return null;
+/** Continuous near-silent loop on the audio thread — the core background trick. */
+function startWebAudioKeepAlive() {
+  const ctx = initWebAudio();
+  if (!ctx || detector.keepAliveNode) return;
+
+  // 2 seconds of very quiet low-frequency pulse (not silent — silent often gets dropped).
+  const seconds = 2;
+  const rate = ctx.sampleRate;
+  const buffer = ctx.createBuffer(1, rate * seconds, rate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < data.length; i++) {
+    const t = i / rate;
+    // Soft 1 Hz pulse envelope * 40 Hz tone at ~1.5% amplitude
+    const env = 0.5 + 0.5 * Math.sin(2 * Math.PI * 1 * t);
+    data[i] = Math.sin(2 * Math.PI * 40 * t) * 0.015 * env;
   }
+
+  const src = ctx.createBufferSource();
+  src.buffer = buffer;
+  src.loop = true;
+  const g = ctx.createGain();
+  g.gain.value = 1;
+  src.connect(g);
+  g.connect(detector.master);
+  src.start(0);
+  detector.keepAliveNode = src;
 }
 
-/** Must run during a user tap (PLAY / D-pad). Plays an audible confirmation. */
-async function unlockDetectorAudio(playConfirm) {
-  buildDetectorClips();
+function startHtmlAudioKeepAlive() {
+  // Second persistence path for iOS Safari (HTML5 media session).
+  if (!detector.htmlLoop) {
+    detector.htmlLoop = new Audio(makeBeepDataUrl(55, 900, 0.04));
+    detector.htmlLoop.loop = true;
+    detector.htmlLoop.volume = 0.04;
+    detector.htmlLoop.setAttribute("playsinline", "");
+    detector.htmlLoop.setAttribute("webkit-playsinline", "");
+  }
+  detector.htmlLoop.play().catch(() => {});
+}
+
+function setupMediaSession() {
+  if (!("mediaSession" in navigator)) return;
   try {
-    const a = new Audio(detector.clips.prime);
-    a.volume = playConfirm === false ? 0.05 : 0.85;
-    a.playsInline = true;
-    await a.play();
-    detector.unlocked = true;
-    return true;
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: "Treasure Radar — Hunting",
+      artist: "Proximity Detector",
+      album: "Keep this playing while hunting",
+    });
+    navigator.mediaSession.playbackState = "playing";
+    // No-op handlers keep the session "active" on some Android builds.
+    for (const action of ["play", "pause", "stop"]) {
+      try {
+        navigator.mediaSession.setActionHandler(action, () => {
+          if (detector.htmlLoop && detector.htmlLoop.paused) {
+            detector.htmlLoop.play().catch(() => {});
+          }
+          if (detector.ctx?.state === "suspended") detector.ctx.resume();
+        });
+      } catch { /* unsupported action */ }
+    }
+  } catch { /* ignore */ }
+}
+
+/**
+ * Unlock everything from a user gesture.
+ * Returns true if audio is ready.
+ */
+async function unlockDetectorAudio(playConfirm) {
+  const ctx = initWebAudio();
+  try {
+    if (ctx && ctx.state === "suspended") await ctx.resume();
+
+    startWebAudioKeepAlive();
+    startHtmlAudioKeepAlive();
+    setupMediaSession();
+
+    if (playConfirm !== false) {
+      // Audible confirmation so the player knows audio unlocked.
+      scheduleBeepNow(0.5, 660, 0.2);
+    } else if (ctx) {
+      // Tiny inaudible tick to keep the unlock chain warm.
+      scheduleBeepNow(0.02, 200, 0.02);
+    }
+
+    detector.unlocked = !!(ctx && ctx.state === "running") || !!(detector.htmlLoop && !detector.htmlLoop.paused);
+    return detector.unlocked || !!ctx;
   } catch (err) {
     console.warn("Audio unlock failed:", err);
     detector.unlocked = false;
@@ -1296,56 +1386,189 @@ async function unlockDetectorAudio(playConfirm) {
   }
 }
 
+/** Schedule one beep on the Web Audio clock (works while main thread is throttled). */
+function scheduleBeepAt(when, intensity) {
+  const ctx = detector.ctx;
+  if (!ctx || !detector.master) return;
+
+  const freq = intensity > 0.75 ? 880 : intensity > 0.4 ? 560 : 320;
+  const dur = intensity > 0.75 ? 0.08 : 0.12;
+  const peak = 0.2 + intensity * 0.55;
+
+  const osc = ctx.createOscillator();
+  const env = ctx.createGain();
+  osc.type = "square";
+  osc.frequency.setValueAtTime(freq, when);
+  env.gain.setValueAtTime(0.0001, when);
+  env.gain.exponentialRampToValueAtTime(Math.max(0.0002, peak), when + 0.01);
+  env.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+  osc.connect(env);
+  env.connect(detector.master);
+  osc.start(when);
+  osc.stop(when + dur + 0.02);
+}
+
+function scheduleBeepNow(intensity, freqOverride, durOverride) {
+  const ctx = detector.ctx;
+  if (!ctx || !detector.master) return;
+  const when = ctx.currentTime + 0.02;
+  if (freqOverride != null) {
+    const osc = ctx.createOscillator();
+    const env = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = freqOverride;
+    const peak = Math.max(0.05, intensity);
+    env.gain.setValueAtTime(0.0001, when);
+    env.gain.exponentialRampToValueAtTime(peak, when + 0.01);
+    env.gain.exponentialRampToValueAtTime(0.0001, when + (durOverride || 0.15));
+    osc.connect(env);
+    env.connect(detector.master);
+    osc.start(when);
+    osc.stop(when + (durOverride || 0.15) + 0.02);
+  } else {
+    scheduleBeepAt(when, intensity);
+  }
+}
+
+/** Beep interval (seconds) from distance in meters — metal-detector zones. */
+function intervalForDistanceM(distM) {
+  if (!isFinite(distM)) return 2.0;
+  if (distM <= PROX_NEAR_M) {
+    // Rapid continuous alarm under 20 m (80–220 ms)
+    return 0.08 + Math.max(0, distM / PROX_NEAR_M) * 0.14;
+  }
+  if (distM <= PROX_FAR_M) {
+    // Faster between 20–50 m (220–900 ms)
+    const t = (distM - PROX_NEAR_M) / (PROX_FAR_M - PROX_NEAR_M);
+    return 0.22 + t * 0.68;
+  }
+  // Slow far pulse (> 50 m)
+  const t = Math.min(1, (distM - PROX_FAR_M) / 80);
+  return 0.9 + t * 1.1;
+}
+
+function intensityForDistanceM(distM) {
+  if (distM <= PROX_NEAR_M) return 0.95;
+  if (distM <= PROX_FAR_M) return 0.55;
+  return 0.25;
+}
+
+function zoneForDistanceM(distM) {
+  if (distM <= PROX_NEAR_M) return "hot";
+  if (distM <= PROX_FAR_M) return "near";
+  return "far";
+}
+
+/**
+ * Lookahead scheduler: queue ~1.25s of beeps on the audio clock.
+ * Safe to call from GPS callbacks while the screen is locked.
+ */
+function pumpBeepScheduler() {
+  if (!detector.running || !detector.ctx || !state.playing || state.finished) return;
+  if (state.nearest.id === -1) return;
+
+  const ctx = detector.ctx;
+  if (ctx.state === "suspended") {
+    ctx.resume().catch(() => {});
+    return;
+  }
+
+  const distM = detector.lastDistM;
+  const interval = intervalForDistanceM(distM);
+  const intensity = intensityForDistanceM(distM);
+  const horizon = ctx.currentTime + 1.25;
+
+  if (detector.nextBeepTime < ctx.currentTime) {
+    detector.nextBeepTime = ctx.currentTime + 0.05;
+  }
+
+  let guard = 0;
+  while (detector.nextBeepTime < horizon && guard++ < 40) {
+    scheduleBeepAt(detector.nextBeepTime, intensity);
+    detector.nextBeepTime += interval;
+  }
+
+  // Haptics only when hot AND page visible (OS usually blocks vibrate when locked).
+  if (!document.hidden && distM <= PROX_NEAR_M && navigator.vibrate) {
+    try {
+      navigator.vibrate([500, 200, 500]);
+    } catch { /* ignore */ }
+  }
+}
+
 function startProximityDetector() {
   detector.running = true;
-  detector.nextBeepAt = 0;
-  if (!detector._tick) {
-    // setInterval survives better than rAF when the browser is partially throttled.
-    detector._tick = setInterval(tickProximityDetector, 50);
-  }
+  detector.nextBeepTime = 0;
+  detector.lastDistM = state.nearest.id === -1 ? Infinity : ftToM(state.nearest.distance);
+
+  startWebAudioKeepAlive();
+  startHtmlAudioKeepAlive();
+  setupMediaSession();
+
+  if (detector.schedulerId) clearInterval(detector.schedulerId);
+  // Short interval when visible; GPS callbacks also pump the scheduler when hidden.
+  detector.schedulerId = setInterval(() => {
+    if (document.hidden) {
+      // While hidden, still try to top-up the audio queue (may be throttled).
+      pumpBeepScheduler();
+      // Nudge HTML loop if iOS paused it.
+      if (detector.htmlLoop && detector.htmlLoop.paused) {
+        detector.htmlLoop.play().catch(() => {});
+      }
+      if (detector.ctx?.state === "suspended") detector.ctx.resume().catch(() => {});
+    } else {
+      pumpBeepScheduler();
+    }
+  }, document.hidden ? 1000 : 200);
+
   dom.detectorStrip.classList.remove("hidden-strip");
   dom.bgStatus.classList.remove("hidden");
+  pumpBeepScheduler();
   updateBackgroundStatus();
 }
 
 function stopProximityDetector() {
   detector.running = false;
-  if (detector._tick) {
-    clearInterval(detector._tick);
-    detector._tick = null;
+  if (detector.schedulerId) {
+    clearInterval(detector.schedulerId);
+    detector.schedulerId = null;
+  }
+  try {
+    if (detector.keepAliveNode) {
+      detector.keepAliveNode.stop();
+      detector.keepAliveNode.disconnect();
+      detector.keepAliveNode = null;
+    }
+  } catch { /* already stopped */ }
+  if (detector.htmlLoop) {
+    detector.htmlLoop.pause();
+    detector.htmlLoop.currentTime = 0;
+  }
+  if ("mediaSession" in navigator) {
+    try { navigator.mediaSession.playbackState = "none"; } catch { /* ignore */ }
   }
   dom.detectorStrip.classList.add("hidden-strip");
 }
 
 function playDetectorBeep(intensity) {
-  buildDetectorClips();
-  const clip =
-    intensity > 0.7 ? detector.clips.high :
-    intensity > 0.35 ? detector.clips.mid :
-    detector.clips.low;
-  const vol = 0.5 + intensity * 0.5;
-  playClip(clip, vol);
-
+  // Used by TEST SOUND / immediate feedback — schedules on audio clock.
+  scheduleBeepNow(intensity);
   if (navigator.vibrate) {
-    try {
-      navigator.vibrate(Math.round(12 + intensity * 40));
-    } catch { /* ignore */ }
+    try { navigator.vibrate(Math.round(20 + intensity * 40)); } catch { /* ignore */ }
   }
 }
 
-function tickProximityDetector() {
-  if (!detector.running || !state.playing || state.finished) return;
-  if (document.hidden) return;
-  if (state.nearest.id === -1) return;
+function updateProximityFromDistanceM(distM) {
+  detector.lastDistM = distM;
+  const zone = zoneForDistanceM(distM);
+  const zoneChanged = zone !== detector.zone;
+  detector.zone = zone;
 
-  const distFt = state.nearest.distance;
-  const closeness = Math.max(0, Math.min(1, 1 - distFt / DETECTOR_MAX_FT));
-  const now = performance.now();
+  // Always top-up the audio queue when distance changes (critical for background).
+  if (detector.running) pumpBeepScheduler();
 
-  const intervalMs = 1600 - closeness * 1480;
-  if (now >= detector.nextBeepAt) {
-    playDetectorBeep(closeness);
-    detector.nextBeepAt = now + Math.max(90, intervalMs);
+  if (zoneChanged && zone === "hot" && !document.hidden && navigator.vibrate) {
+    try { navigator.vibrate([500, 200, 500]); } catch { /* ignore */ }
   }
 }
 
@@ -1356,31 +1579,47 @@ function updateProximityUI() {
     return;
   }
 
-  const distFt = state.nearest.distance;
-  const distM = ftToM(distFt);
-  const closeness = Math.max(0, Math.min(1, 1 - distFt / DETECTOR_MAX_FT));
+  // Prefer Haversine when we have real GPS origin + target lat/lng.
+  let distM = ftToM(state.nearest.distance);
+  const box = state.boxes.find((b) => b.id === state.nearest.id);
+  if (!DEBUG_MOVE && gps.origin && box && gps.lastAccepted) {
+    const target = feetOffsetToLatLng(box.x, box.y);
+    if (target) {
+      distM = haversineMeters(
+        gps.lastAccepted.lat,
+        gps.lastAccepted.lng,
+        target.lat,
+        target.lng
+      );
+    }
+  }
 
-  dom.distance.textContent = formatDistanceM(distFt);
-  dom.distance.style.color = closeness > 0.75 ? "var(--gold)" : "";
+  updateProximityFromDistanceM(distM);
+
+  const closeness =
+    distM <= PROX_NEAR_M ? 1 :
+    distM <= PROX_FAR_M ? 0.65 :
+    Math.max(0.1, 1 - distM / 120);
+
+  const label = distM >= 100 ? `${Math.round(distM)} m` : `${distM.toFixed(1)} m`;
+  dom.distance.textContent = label;
+  dom.distance.style.color = detector.zone === "hot" ? "var(--gold)" : "";
 
   if (dom.stripDistance) {
-    dom.stripDistance.textContent = formatDistanceM(distFt);
-    dom.stripDistance.style.color = closeness > 0.75 ? "var(--gold)" : "";
+    dom.stripDistance.textContent = label;
+    dom.stripDistance.style.color = detector.zone === "hot" ? "var(--gold)" : "";
   }
   if (dom.stripFill) dom.stripFill.style.width = `${closeness * 100}%`;
   if (dom.detectorFill) dom.detectorFill.style.width = `${closeness * 100}%`;
   if (dom.detectorDistance) {
-    dom.detectorDistance.textContent = formatDistanceM(distFt);
-    dom.detectorDistance.classList.toggle("hot", distM <= FLASH_RANGE_M);
+    dom.detectorDistance.textContent = label;
+    dom.detectorDistance.classList.toggle("hot", detector.zone === "hot");
   }
   if (dom.detectorSignal) {
-    if (distM <= FLASH_RANGE_M) dom.detectorSignal.textContent = "SIGNAL · HOT!";
-    else if (distM <= AR_RANGE_M) dom.detectorSignal.textContent = "SIGNAL · STRONG";
-    else if (closeness > 0.4) dom.detectorSignal.textContent = "SIGNAL · rising";
-    else dom.detectorSignal.textContent = "DETECTOR · scanning";
+    if (detector.zone === "hot") dom.detectorSignal.textContent = "ALARM · < 20 m";
+    else if (detector.zone === "near") dom.detectorSignal.textContent = "SIGNAL · 20–50 m";
+    else dom.detectorSignal.textContent = "SCANNING · > 50 m";
   }
-
-  detector.lastDistFt = distFt;
 }
 
 /* =========================================================================
@@ -1475,7 +1714,7 @@ function collectNearestFromAR() {
 }
 
 /* =========================================================================
-   Background tracking — wake lock + keep-alive (best effort)
+   Background tracking — media session + wake lock + audio persistence
    ========================================================================= */
 
 async function acquireWakeLock() {
@@ -1485,7 +1724,7 @@ async function acquireWakeLock() {
       wakeLock.addEventListener("release", () => { wakeLock = null; });
     }
   } catch {
-    /* denied or unsupported */
+    /* denied / unsupported — audio keep-alive is the fallback */
   }
 }
 
@@ -1497,90 +1736,72 @@ async function releaseWakeLock() {
 }
 
 function startBackgroundKeepAlive() {
-  buildDetectorClips();
-
-  // Near-silent looping clip keeps the media pipeline warm (not meant to be heard).
-  if (!keepAliveAudio) {
-    keepAliveAudio = new Audio(makeBeepDataUrl(40, 800, 0.001));
-    keepAliveAudio.loop = true;
-    keepAliveAudio.volume = 0.001;
-    keepAliveAudio.setAttribute("playsinline", "");
-  }
-  keepAliveAudio.play().catch(() => {});
-
-  // Canvas stream as a playing "video" — helps prevent aggressive sleep on some phones.
-  let v = document.getElementById("nosleep-video");
-  if (!v) {
-    v = document.createElement("video");
-    v.id = "nosleep-video";
-    v.setAttribute("playsinline", "");
-    v.setAttribute("webkit-playsinline", "");
-    v.muted = true;
-    v.loop = true;
-    v.playsInline = true;
-    v.style.cssText =
-      "position:fixed;width:2px;height:2px;opacity:0.01;pointer-events:none;bottom:0;left:0;z-index:-1";
-    document.body.appendChild(v);
-    window.__nosleepVideo = v;
-  }
-
-  try {
-    if (!window.__nosleepStream) {
-      const c = document.createElement("canvas");
-      c.width = 2;
-      c.height = 2;
-      const ctx = c.getContext("2d");
-      const paint = () => {
-        if (!state.playing) return;
-        ctx.fillStyle = "#111";
-        ctx.fillRect(0, 0, 2, 2);
-        requestAnimationFrame(paint);
-      };
-      paint();
-      window.__nosleepStream = c.captureStream(5);
-      v.srcObject = window.__nosleepStream;
-    }
-    v.play().catch(() => {});
-  } catch {
-    /* captureStream unsupported — Wake Lock alone still helps */
+  // Audio persistence is the real background mechanism.
+  startWebAudioKeepAlive();
+  startHtmlAudioKeepAlive();
+  setupMediaSession();
+  if (detector.ctx?.state === "suspended") {
+    detector.ctx.resume().catch(() => {});
   }
 }
 
 function stopBackgroundKeepAlive() {
-  if (keepAliveAudio) {
-    keepAliveAudio.pause();
-    keepAliveAudio.currentTime = 0;
+  if (detector.htmlLoop) {
+    detector.htmlLoop.pause();
   }
-  if (window.__nosleepVideo) {
-    window.__nosleepVideo.pause();
-  }
+  try {
+    if (detector.keepAliveNode) {
+      detector.keepAliveNode.stop();
+      detector.keepAliveNode.disconnect();
+      detector.keepAliveNode = null;
+    }
+  } catch { /* ignore */ }
 }
 
 function updateBackgroundStatus() {
   if (!dom.bgStatus || !state.playing) return;
   if (document.hidden) {
-    state.bgPaused = true;
-    dom.bgStatus.textContent = `Paused — unlock phone for sound (${gps.hiddenUpdates} GPS fixes)`;
-    dom.bgStatus.style.color = "#f87171";
+    state.bgPaused = false; // we try to keep hunting in background
+    dom.bgStatus.textContent =
+      `Background hunt · ${gps.hiddenUpdates} GPS fixes · audio ${detector.unlocked ? "ON" : "OFF"}`;
+    dom.bgStatus.style.color = detector.unlocked ? "#4ade80" : "#f87171";
   } else if (!detector.unlocked) {
-    dom.bgStatus.textContent = "Tap PLAY again if no beeps (audio blocked)";
+    dom.bgStatus.textContent = "Tap TEST SOUND / PLAY if beeps are missing";
     dom.bgStatus.style.color = "#fbbf24";
   } else {
     state.bgPaused = false;
     dom.bgStatus.textContent = wakeLock
-      ? "Detector active · screen kept awake"
-      : "Detector active · keep screen on for sound";
-    dom.bgStatus.style.color = wakeLock ? "" : "#fbbf24";
+      ? "Detector live · screen wake lock ON"
+      : "Detector live · audio keep-alive (lock screen OK)";
+    dom.bgStatus.style.color = "";
   }
 }
 
 document.addEventListener("visibilitychange", () => {
   updateBackgroundStatus();
-  if (!document.hidden && state.playing && !state.finished) {
-    if (!DEBUG_MOVE && gps.watchId === null) startGpsWatch();
-    acquireWakeLock();
+  if (state.playing && !state.finished) {
+    // Whether hidden or visible — keep media + GPS + beep queue alive.
     startBackgroundKeepAlive();
-    if (detector.clips) playClip(detector.clips.mid, 0.45);
+    pumpBeepScheduler();
+    if (!DEBUG_MOVE && gps.watchId === null) startGpsWatch();
+    if (!document.hidden) {
+      acquireWakeLock();
+    }
+  }
+});
+
+// Page Lifecycle — some Androids freeze timers but still deliver GPS.
+window.addEventListener("pagehide", () => {
+  if (state.playing) {
+    startBackgroundKeepAlive();
+    pumpBeepScheduler();
+  }
+});
+window.addEventListener("pageshow", () => {
+  if (state.playing) {
+    startBackgroundKeepAlive();
+    pumpBeepScheduler();
+    acquireWakeLock();
   }
 });
 
@@ -1914,10 +2135,9 @@ function beginPlay() {
     toggleCompass(true);
   }
   startProximityDetector();
-  // Immediate first beep so the player hears the detector right away.
-  playDetectorBeep(0.25);
-  detector.nextBeepAt = performance.now() + 400;
+  playDetectorBeep(0.35);
   acquireWakeLock();
+  startBackgroundKeepAlive();
   updateBackgroundStatus();
 }
 
@@ -1970,10 +2190,13 @@ function startGpsWatch() {
     (err) => {
       setGpsStatus(`GPS · error ${err.code}`);
       if (!document.hidden) flash("GPS signal lost — keep moving outdoors.");
+      // Keep audio alive even if GPS blips.
+      startBackgroundKeepAlive();
+      pumpBeepScheduler();
     },
     {
       enableHighAccuracy: true,
-      maximumAge: document.hidden ? 5000 : 1000,
+      maximumAge: 1000,
       timeout: 20000,
     }
   );
@@ -1992,6 +2215,8 @@ function onGpsUpdate(position) {
   if (document.hidden) {
     gps.hiddenUpdates++;
     updateBackgroundStatus();
+    // Critical: refresh media pipeline on every background GPS fix.
+    startBackgroundKeepAlive();
   }
 
   const { latitude: lat, longitude: lng, accuracy } = position.coords;
@@ -2000,6 +2225,8 @@ function onGpsUpdate(position) {
 
   if (accuracyFt > GPS_MAX_ACCURACY_FT) {
     setGpsStatus(`GPS · weak ±${Math.round(accuracyFt)} ft`);
+    // Still keep hunting audio going with last known distance.
+    pumpBeepScheduler();
     return;
   }
 
@@ -2010,33 +2237,43 @@ function onGpsUpdate(position) {
     state.pos = { x: ROOM_SIZE_FT / 2, y: ROOM_SIZE_FT / 2 };
     setGpsStatus(`GPS · locked ±${Math.round(accuracyFt)} ft`);
     render();
+    pumpBeepScheduler();
     return;
   }
 
-  setGpsStatus(`GPS · ±${Math.round(accuracyFt)} ft`);
+  if (!document.hidden) setGpsStatus(`GPS · ±${Math.round(accuracyFt)} ft`);
 
-  if (!state.playing) return;
-
-  // Distance from last accepted fix — filter out GPS jitter while standing still.
-  const mPerDegLat = 111320;
-  const mPerDegLng = 111320 * Math.cos((gps.lastAccepted.lat * Math.PI) / 180);
-  const dEast = (lng - gps.lastAccepted.lng) * mPerDegLng * FT_PER_M;
-  const dNorth = (lat - gps.lastAccepted.lat) * mPerDegLat * FT_PER_M;
-  const hopFt = Math.hypot(dEast, dNorth);
-
-  if (hopFt < GPS_MIN_MOVE_FT) return;
-
-  const from = { ...state.pos };
-  const next = latLngToFeetOffset(lat, lng);
-  gps.lastAccepted = { lat, lng };
-
-  // Derive facing from GPS track when compass is off.
-  if (!state.compassEnabled && hopFt >= GPS_MIN_MOVE_FT) {
-    state.heading = Math.atan2(dEast, dNorth);
+  if (!state.playing) {
+    gps.lastAccepted = { lat, lng };
+    return;
   }
 
-  applyPosition(next.x, next.y, { countWalk: true, from });
-  if (hopFt >= 6 && !document.hidden) buzz(25);
+  // Always refresh lastAccepted for Haversine proximity (even tiny GPS hops).
+  const prev = gps.lastAccepted || { lat, lng };
+  const mPerDegLat = 111320;
+  const mPerDegLng = 111320 * Math.cos((prev.lat * Math.PI) / 180);
+  const dEast = (lng - prev.lng) * mPerDegLng * FT_PER_M;
+  const dNorth = (lat - prev.lat) * mPerDegLat * FT_PER_M;
+  const hopFt = Math.hypot(dEast, dNorth);
+
+  gps.lastAccepted = { lat, lng };
+
+  // Move the virtual avatar only on meaningful hops (anti-jitter).
+  if (hopFt >= GPS_MIN_MOVE_FT) {
+    const from = { ...state.pos };
+    const next = latLngToFeetOffset(lat, lng);
+    if (!state.compassEnabled) {
+      state.heading = Math.atan2(dEast, dNorth);
+    }
+    applyPosition(next.x, next.y, { countWalk: true, from });
+    if (hopFt >= 6 && !document.hidden) buzz(25);
+  } else {
+    // No avatar move — still refresh nearest distance / alarm rate.
+    updateNearest();
+    updateProximityUI();
+  }
+
+  pumpBeepScheduler();
   updateBackgroundStatus();
 }
 

@@ -74,7 +74,20 @@ Tap **← RADAR** in AR to return to the map view (AR re-opens when you enter 20
 
 ### Background / screen off
 
-The game uses **Wake Lock** (keeps screen on), silent audio keep-alive, and continuous `watchPosition` to reduce pauses. **However**, mobile browsers often **suspend web pages when the screen locks** — GPS/audio/AR may stop until you unlock the phone. This is a browser limit; a native app would be needed for guaranteed background tracking.
+The hunt uses a **background audio persistence** stack so proximity beeps can continue
+after the screen locks:
+
+1. **Web Audio** continuous low pulse (keeps the audio thread alive)
+2. **HTML5 looping audio** + **Media Session** (helps iOS/Android keep the page warm)
+3. Beeps are **scheduled on the AudioContext clock** (not `setInterval`), so they keep
+   firing even when the main JS thread is throttled
+4. **GPS `watchPosition`** still updates distance on many phones while media is playing
+5. Screen **Wake Lock** when the OS allows it
+
+**Zones:** `>50 m` slow beep · `20–50 m` faster · `<20 m` rapid alarm (+ vibrate when screen is on)
+
+**Limits:** Some phones still pause web pages after long lock periods. Vibration is often
+blocked while locked (OS policy). Keep media volume up; do not force-stop the browser.
 
 ## Controls
 
